@@ -1,0 +1,23 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas
+
+# Build check artifacts
+check_output.txt
+check.bat
+check.ps1
+
+# Claude Code
+.claude/
+.agents/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
