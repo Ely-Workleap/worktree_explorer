@@ -138,27 +138,30 @@ r#"Split the branch '{branch}' in '{repo}' into a stacked PR chain. Follow these
 
 2. COMMIT: Stage and commit any uncommitted files into well-structured commits grouped by concern. Use conventional commit messages.
 
-3. SPLIT: Create a new branch+worktree for EVERY group (including group 0) as sibling directories to the repo:
+3. JIRA: Extract the parent Jira ticket ID from the source branch name (e.g. SGD-12345 from feature/SGD-12345-my-feature). Using the Atlassian MCP tool, create a Jira subtask under the parent ticket for EACH group identified in step 1. Use the subtask summary as a short description (e.g. "Part 1: Add data models"). Collect the new subtask issue keys (e.g. SGD-12346, SGD-12347, ...) — these will be used in branch names.
+
+4. SPLIT: Create a new branch+worktree for EVERY group (including group 0) as sibling directories to the repo:
    - Every branch in the stack MUST have its own worktree so it can be opened and built independently
    - For group 0: branch from master, cherry-pick or checkout relevant commits/files
    - For group N: branch from group N-1's branch
-   - Worktree names: wt-<ticket>-partN
-   - Branch names: <ticket>-partN-<short-description>
+   - Worktree names: wt-<subtask-key>  (e.g. wt-SGD-12346)
+   - Branch names: feature/<subtask-key>-<short-description>  (e.g. feature/SGD-12346-add-data-models)
+   - The feature/ prefix and subtask issue key are MANDATORY for Jira tracking
    - Each branch MUST include the test files that cover its source code (colocate tests with implementation, never bundle all tests into a single PR)
 
-4. METADATA: Update (or create) .worktree-meta.json at the repo root '{repo}' with V2 format:
+5. METADATA: Update (or create) .worktree-meta.json at the repo root '{repo}' with V2 format:
 ```json
 {{
   "version": 2,
   "worktrees": {{
-    "wt-<ticket>-part1": {{ "base_branch": "master" }},
-    "wt-<ticket>-part2": {{ "base_branch": "<ticket>-part1-<desc>" }}
+    "wt-SGD-12346": {{ "base_branch": "master" }},
+    "wt-SGD-12347": {{ "base_branch": "feature/SGD-12346-add-data-models" }}
   }},
   "stacks": {{
-    "<ticket>-stack": {{
-      "name": "<ticket>-stack",
+    "<parent-ticket>-stack": {{
+      "name": "<parent-ticket>-stack",
       "root_branch": "master",
-      "branches": ["<ticket>-part1-<desc>", "<ticket>-part2-<desc>"],
+      "branches": ["feature/SGD-12346-add-data-models", "feature/SGD-12347-add-api"],
       "pr_numbers": {{}}
     }}
   }}
@@ -166,9 +169,7 @@ r#"Split the branch '{branch}' in '{repo}' into a stacked PR chain. Follow these
 ```
    If the file already exists, merge your entries into the existing worktrees and stacks objects. The branches array is ordered bottom-to-top (index 0 = closest to root). Each branch base = previous branch in array, or root_branch for index 0.
 
-5. PUSH + PR: Push all branches with --force-with-lease, then create draft PRs with correct base chain (gh pr create --draft --base <prev-branch> --head <branch>). Look for a PR template in .github/pull_request_template.md and follow its format.
-
-6. JIRA: Extract the Jira ticket ID from the branch name (e.g. SGD-12345). Title each PR as 'SGD-12345 Part N: <description>'. Create a Jira subtask under the parent ticket for each part using the Atlassian MCP tool.
+6. PUSH + PR: Push all branches with --force-with-lease, then create draft PRs with correct base chain (gh pr create --draft --base <prev-branch> --head <branch>). Title each PR as '<subtask-key> Part N: <description>'. Look for a PR template in .github/pull_request_template.md and follow its format.
 
 7. VERIFY: Check each branch has the expected changes and no overlap with other groups.
 
