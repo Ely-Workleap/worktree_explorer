@@ -134,7 +134,7 @@ fn build_split_prompt(branch_name: &str, repo_path: &str) -> String {
     format!(
 r#"Split the branch '{branch}' in '{repo}' into a stacked PR chain. Follow these steps exactly:
 
-1. REVIEW: Look at all uncommitted changes (git status, git diff) and existing commits (git log --oneline {branch} --not origin/master). Group everything into logical concerns ordered by dependency (infra/config, models/types, shared utils, core logic, UI, tests).
+1. REVIEW: Look at all uncommitted changes (git status, git diff) and existing commits (git log --oneline {branch} --not origin/master). Group everything into logical concerns ordered by dependency (infra/config, models/types, shared utils, core logic, UI). IMPORTANT: Do NOT create a separate "tests" group — instead, include each test file in the same group as the source code it tests (e.g. utils.test.ts goes with utils.ts, ComponentName.spec.tsx goes with ComponentName.tsx).
 
 2. COMMIT: Stage and commit any uncommitted files into well-structured commits grouped by concern. Use conventional commit messages.
 
@@ -144,6 +144,7 @@ r#"Split the branch '{branch}' in '{repo}' into a stacked PR chain. Follow these
    - For group N: branch from group N-1's branch
    - Worktree names: wt-<ticket>-partN
    - Branch names: <ticket>-partN-<short-description>
+   - Each branch MUST include the test files that cover its source code (colocate tests with implementation, never bundle all tests into a single PR)
 
 4. METADATA: Update (or create) .worktree-meta.json at the repo root '{repo}' with V2 format:
 ```json
