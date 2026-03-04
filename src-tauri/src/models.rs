@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
@@ -13,9 +15,11 @@ pub struct WorktreeInfo {
     pub path: String,
     pub branch: Option<String>,
     pub base_branch: Option<String>,
+    pub stack_name: Option<String>,
     pub is_main: bool,
     pub is_dirty: bool,
     pub is_locked: bool,
+    pub is_rebasing: bool,
     pub ahead: usize,
     pub behind: usize,
     pub file_changes: usize,
@@ -24,6 +28,7 @@ pub struct WorktreeInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct MergeResult {
     pub success: bool,
+    pub has_conflicts: bool,
     pub message: String,
 }
 
@@ -41,4 +46,121 @@ pub struct CreateWorktreeRequest {
     pub branch: Option<String>,
     pub create_branch: bool,
     pub base_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProgressEvent {
+    pub step: usize,
+    pub total: usize,
+    pub message: String,
+}
+
+// --- Stack types ---
+
+/// Persisted in .worktree-meta.json under "stacks"
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackInfo {
+    pub name: String,
+    pub root_branch: String,
+    pub branches: Vec<String>,
+    #[serde(default)]
+    pub pr_numbers: HashMap<String, Option<u64>>,
+}
+
+/// Enriched branch info returned by get_stack_details
+#[derive(Debug, Clone, Serialize)]
+pub struct StackBranchInfo {
+    pub branch: String,
+    pub worktree_name: Option<String>,
+    pub worktree_path: Option<String>,
+    pub pr_number: Option<u64>,
+    pub is_dirty: bool,
+    pub is_rebasing: bool,
+    pub ahead: usize,
+    pub behind: usize,
+    pub file_changes: usize,
+    pub position: usize,
+}
+
+/// GitHub PR data (fetched live, not persisted)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrStatus {
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub review_decision: Option<String>,
+    pub url: String,
+    pub base_branch: String,
+    pub is_draft: bool,
+    pub checks_status: Option<String>,
+}
+
+/// Result of cascade rebase
+#[derive(Debug, Clone, Serialize)]
+pub struct CascadeRebaseResult {
+    pub results: Vec<CascadeRebaseStep>,
+    pub stopped_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CascadeRebaseStep {
+    pub branch: String,
+    pub success: bool,
+    pub has_conflicts: bool,
+    pub message: String,
+}
+
+/// Request to create a new stack
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateStackRequest {
+    pub repo_path: String,
+    pub stack_name: String,
+    pub root_branch: String,
+    pub initial_branch: String,
+    pub worktree_name: String,
+}
+
+/// Request to add a branch to an existing stack
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddToStackRequest {
+    pub repo_path: String,
+    pub stack_name: String,
+    pub branch_name: String,
+    pub worktree_name: String,
+    pub position: Option<usize>,
+}
+
+// --- Split types ---
+
+/// A single group in a split plan — becomes one branch/worktree in the stack.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SplitGroup {
+    pub branch_name: String,
+    pub worktree_name: String,
+    pub description: String,
+    /// Scenario A: commit SHAs to cherry-pick (multi-commit source)
+    #[serde(default)]
+    pub commits: Vec<String>,
+    /// Scenario B: file paths to checkout from source branch (single-commit/uncommitted source)
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
+/// The complete split plan produced by Claude Code's analysis.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SplitPlan {
+    pub repo_path: String,
+    pub source_branch: String,
+    pub stack_name: String,
+    pub root_branch: String,
+    pub groups: Vec<SplitGroup>,
+}
+
+/// Result of executing a split plan.
+#[derive(Debug, Clone, Serialize)]
+pub struct SplitResult {
+    pub stack: StackInfo,
+    pub branches_created: Vec<String>,
+    pub worktrees_created: Vec<String>,
+    pub backup_branch: String,
 }
