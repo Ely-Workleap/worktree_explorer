@@ -1,15 +1,24 @@
-use git2::Repository;
+use git2::{Repository, RepositoryState};
 use std::path::PathBuf;
 use std::process::Command;
 
 use crate::error::AppError;
 use crate::git::metadata;
 use crate::git::status::get_repo_status;
-use crate::models::{CreateWorktreeRequest, MergeResult, WorktreeInfo};
+use crate::models::{CreateWorktreeRequest, MergeResult, ProgressEvent, WorktreeInfo};
+
+fn is_repo_rebasing(state: RepositoryState) -> bool {
+    matches!(
+        state,
+        RepositoryState::Rebase
+            | RepositoryState::RebaseMerge
+            | RepositoryState::RebaseInteractive
+    )
+}
 
 pub fn list_worktrees(repo_path: &str) -> Result<Vec<WorktreeInfo>, AppError> {
     let repo = Repository::open(repo_path)?;
-    let meta = metadata::read_metadata(repo_path);
+    let meta = metadata::read_metadata_v2(repo_path);
     let mut result = Vec::new();
 
     // Add main worktree
@@ -24,9 +33,11 @@ pub fn list_worktrees(repo_path: &str) -> Result<Vec<WorktreeInfo>, AppError> {
         path: repo_path.to_string(),
         branch: main_branch,
         base_branch: None,
+        stack_name: None,
         is_main: true,
         is_dirty: main_status.is_dirty,
         is_locked: false,
+        is_rebasing: is_repo_rebasing(repo.state()),
         ahead: main_status.ahead,
         behind: main_status.behind,
         file_changes: main_status.file_changes,
@@ -49,13 +60,14 @@ pub fn list_worktrees(repo_path: &str) -> Result<Vec<WorktreeInfo>, AppError> {
         let is_locked = wt.is_locked().map(|s| !matches!(s, git2::WorktreeLockStatus::Unlocked)).unwrap_or(false);
 
         // Open the worktree's repo to get status
-        let (branch, is_dirty, ahead, behind, file_changes) =
+        let (branch, is_dirty, is_rebasing, ahead, behind, file_changes) =
             match Repository::open(&wt_path) {
                 Ok(wt_repo) => {
                     let branch = wt_repo
                         .head()
                         .ok()
                         .and_then(|h| h.shorthand().map(String::from));
+                    let rebasing = is_repo_rebasing(wt_repo.state());
                     let status = get_repo_status(&wt_repo).unwrap_or_else(|_| {
                         crate::git::status::RepoStatus {
                             is_dirty: false,
@@ -67,24 +79,30 @@ pub fn list_worktrees(repo_path: &str) -> Result<Vec<WorktreeInfo>, AppError> {
                     (
                         branch,
                         status.is_dirty,
+                        rebasing,
                         status.ahead,
                         status.behind,
                         status.file_changes,
                     )
                 }
-                Err(_) => (None, false, 0, 0, 0),
+                Err(_) => (None, false, false, 0, 0, 0),
             };
 
-        let base_branch = meta.get(name).cloned();
+        let base_branch = metadata::get_base_branch(&meta, name);
+        let stack_name = branch
+            .as_deref()
+            .and_then(|b| metadata::find_stack_for_branch(&meta, b));
 
         result.push(WorktreeInfo {
             name: name.to_string(),
             path: wt_path,
             branch,
             base_branch,
+            stack_name,
             is_main: false,
             is_dirty,
             is_locked,
+            is_rebasing,
             ahead,
             behind,
             file_changes,
@@ -94,10 +112,25 @@ pub fn list_worktrees(repo_path: &str) -> Result<Vec<WorktreeInfo>, AppError> {
     Ok(result)
 }
 
-pub fn create_worktree(request: &CreateWorktreeRequest) -> Result<WorktreeInfo, AppError> {
+pub fn create_worktree(
+    request: &CreateWorktreeRequest,
+    on_progress: impl Fn(ProgressEvent),
+) -> Result<WorktreeInfo, AppError> {
+    let total = if request.create_branch && request.base_branch.is_some() { 5 } else { 4 };
+    let mut step = 0;
+
+    let mut emit = |msg: &str| {
+        step += 1;
+        on_progress(ProgressEvent {
+            step,
+            total,
+            message: msg.to_string(),
+        });
+    };
+
+    emit("Opening repository...");
     let repo = Repository::open(&request.repo_path)?;
 
-    // Determine worktree path: sibling directory to the repo
     let repo_parent = PathBuf::from(&request.repo_path)
         .parent()
         .ok_or_else(|| AppError::Custom("Cannot determine parent directory".to_string()))?
@@ -116,12 +149,10 @@ pub fn create_worktree(request: &CreateWorktreeRequest) -> Result<WorktreeInfo, 
         .as_deref()
         .ok_or_else(|| AppError::Custom("Branch name is required".to_string()))?;
 
-    // Determine the base branch to save in metadata
     let effective_base_branch = if request.create_branch {
         if let Some(base) = &request.base_branch {
             Some(base.clone())
         } else {
-            // Default to HEAD branch name
             repo.head()
                 .ok()
                 .and_then(|h| h.shorthand().map(String::from))
@@ -131,23 +162,42 @@ pub fn create_worktree(request: &CreateWorktreeRequest) -> Result<WorktreeInfo, 
     };
 
     if request.create_branch {
-        // Resolve the base commit: use base_branch if provided, otherwise HEAD
-        let commit = if let Some(base) = &request.base_branch {
-            let base_ref_name = format!("refs/heads/{}", base);
-            let reference = repo.find_reference(&base_ref_name).map_err(|_| {
-                AppError::Custom(format!("Base branch '{}' not found", base))
-            })?;
-            reference.peel_to_commit()?
-        } else {
-            repo.head()?.peel_to_commit()?
-        };
-        let branch = repo.branch(branch_name, &commit, false)?;
-        let branch_ref = branch
-            .into_reference()
-            .name()
-            .ok_or_else(|| AppError::Custom("Invalid branch reference".to_string()))?
-            .to_string();
+        if let Some(base) = &request.base_branch {
+            emit(&format!("Fetching latest {}...", base));
+            let _ = Command::new("git")
+                .args(["-C", &request.repo_path, "fetch", "origin", base])
+                .output();
+        }
 
+        // Check if the branch already exists
+        let branch_ref_name = format!("refs/heads/{}", branch_name);
+        let branch_ref = if repo.find_reference(&branch_ref_name).is_ok() {
+            // Branch already exists, reuse it
+            emit(&format!("Using existing branch {}...", branch_name));
+            branch_ref_name
+        } else {
+            emit(&format!("Creating branch {}...", branch_name));
+            let commit = if let Some(base) = &request.base_branch {
+                let remote_ref = format!("refs/remotes/origin/{}", base);
+                let local_ref = format!("refs/heads/{}", base);
+                let reference = repo.find_reference(&remote_ref)
+                    .or_else(|_| repo.find_reference(&local_ref))
+                    .map_err(|_| {
+                        AppError::Custom(format!("Base branch '{}' not found", base))
+                    })?;
+                reference.peel_to_commit()?
+            } else {
+                repo.head()?.peel_to_commit()?
+            };
+            let branch = repo.branch(branch_name, &commit, false)?;
+            branch
+                .into_reference()
+                .name()
+                .ok_or_else(|| AppError::Custom("Invalid branch reference".to_string()))?
+                .to_string()
+        };
+
+        emit("Checking out worktree...");
         repo.worktree(
             &request.name,
             &wt_path,
@@ -157,12 +207,46 @@ pub fn create_worktree(request: &CreateWorktreeRequest) -> Result<WorktreeInfo, 
             ),
         )?;
     } else {
-        // Use existing branch
-        let branch_ref_name = format!("refs/heads/{}", branch_name);
-        let reference = repo.find_reference(&branch_ref_name).map_err(|_| {
+        emit(&format!("Resolving branch {}...", branch_name));
+
+        // Check if it's a local branch first
+        let local_ref = format!("refs/heads/{}", branch_name);
+        let branch_ref = if repo.find_reference(&local_ref).is_ok() {
+            local_ref
+        } else {
+            // Try as a remote branch (e.g. "origin/feature-x")
+            let remote_ref = if branch_name.contains('/') {
+                format!("refs/remotes/{}", branch_name)
+            } else {
+                format!("refs/remotes/origin/{}", branch_name)
+            };
+            let remote_reference = repo.find_reference(&remote_ref).map_err(|_| {
+                AppError::Custom(format!("Branch '{}' not found", branch_name))
+            })?;
+
+            // Create a local tracking branch from the remote
+            let local_name = if let Some(stripped) = branch_name.strip_prefix("origin/") {
+                stripped
+            } else if let Some(pos) = branch_name.find('/') {
+                &branch_name[pos + 1..]
+            } else {
+                branch_name
+            };
+
+            emit(&format!("Creating local branch {}...", local_name));
+            let commit = remote_reference.peel_to_commit()?;
+            repo.branch(local_name, &commit, false).map_err(|e| {
+                AppError::Custom(format!("Failed to create local branch '{}': {}", local_name, e))
+            })?;
+
+            format!("refs/heads/{}", local_name)
+        };
+
+        let reference = repo.find_reference(&branch_ref).map_err(|_| {
             AppError::Custom(format!("Branch '{}' not found", branch_name))
         })?;
 
+        emit("Checking out worktree...");
         repo.worktree(
             &request.name,
             &wt_path,
@@ -170,12 +254,11 @@ pub fn create_worktree(request: &CreateWorktreeRequest) -> Result<WorktreeInfo, 
         )?;
     }
 
-    // Save base branch metadata
     if let Some(base) = &effective_base_branch {
         let _ = metadata::save_base_branch(&request.repo_path, &request.name, base);
     }
 
-    // Return info about the new worktree
+    emit("Finalizing...");
     let wt_repo = Repository::open(&wt_path)?;
     let branch = wt_repo
         .head()
@@ -188,9 +271,11 @@ pub fn create_worktree(request: &CreateWorktreeRequest) -> Result<WorktreeInfo, 
         path: wt_path.to_string_lossy().to_string(),
         branch,
         base_branch: effective_base_branch,
+        stack_name: None,
         is_main: false,
         is_dirty: status.is_dirty,
         is_locked: false,
+        is_rebasing: false,
         ahead: status.ahead,
         behind: status.behind,
         file_changes: status.file_changes,
@@ -198,39 +283,69 @@ pub fn create_worktree(request: &CreateWorktreeRequest) -> Result<WorktreeInfo, 
 }
 
 pub fn delete_worktree(repo_path: &str, worktree_name: &str) -> Result<(), AppError> {
-    let repo = Repository::open(repo_path)?;
+    // Get the branch name before deleting (for stack cleanup)
+    let branch = get_worktree_branch(repo_path, worktree_name);
 
-    // Find the worktree to get its path
-    let wt = repo.find_worktree(worktree_name)?;
-    let wt_path = wt.path().to_path_buf();
+    // Use git CLI which handles unlocking, pruning, and directory removal
+    let output = Command::new("git")
+        .args(["-C", repo_path, "worktree", "remove", "--force", worktree_name])
+        .output()
+        .map_err(|e| AppError::Custom(format!("Failed to run git worktree remove: {}", e)))?;
 
-    // If locked, unlock first
-    if wt.is_locked().map(|s| !matches!(s, git2::WorktreeLockStatus::Unlocked)).unwrap_or(false) {
-        wt.unlock()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(AppError::Custom(
+            if !stderr.trim().is_empty() {
+                stderr.trim().to_string()
+            } else {
+                "git worktree remove failed.".to_string()
+            },
+        ));
     }
 
-    // Prune the worktree
-    wt.prune(Some(
-        git2::WorktreePruneOptions::new()
-            .valid(true)
-            .working_tree(true),
-    ))?;
-
-    // Remove the directory
-    if wt_path.exists() {
-        std::fs::remove_dir_all(&wt_path)?;
-    }
-
-    // Clean up metadata
-    let _ = metadata::remove_worktree_meta(repo_path, worktree_name);
+    // Clean up metadata (pass branch for stack cleanup)
+    let _ = metadata::remove_worktree_meta(repo_path, worktree_name, branch.as_deref());
 
     Ok(())
 }
 
+/// Get the branch checked out in a worktree (by opening its repo).
+fn get_worktree_branch(repo_path: &str, worktree_name: &str) -> Option<String> {
+    let repo = Repository::open(repo_path).ok()?;
+    let wt = repo.find_worktree(worktree_name).ok()?;
+    let wt_path = wt.path().to_string_lossy().to_string();
+    let wt_repo = Repository::open(&wt_path).ok()?;
+    wt_repo
+        .head()
+        .ok()
+        .and_then(|h| h.shorthand().map(String::from))
+}
+
 pub fn rebase_onto_master(_repo_path: &str, worktree_path: &str, base_branch: &str) -> Result<MergeResult, AppError> {
-    // Step 1: Find the merge-base SHA between base_branch and HEAD
+    // Fetch latest master from remote
+    let fetch_output = Command::new("git")
+        .args(["-C", worktree_path, "fetch", "origin", "master"])
+        .output()
+        .map_err(|e| AppError::Custom(format!("Failed to fetch master: {}", e)))?;
+
+    if !fetch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_output.stderr).to_string();
+        return Ok(MergeResult {
+            success: false,
+            has_conflicts: false,
+            message: format!("Failed to fetch latest master: {}", stderr.trim()),
+        });
+    }
+
+    rebase_onto(worktree_path, "origin/master", base_branch)
+}
+
+/// Generic rebase helper: rebases the current branch in worktree_path
+/// onto `onto_ref`, using the merge-base between `old_base_ref` and HEAD.
+pub fn rebase_onto(worktree_path: &str, onto_ref: &str, old_base_ref: &str) -> Result<MergeResult, AppError> {
+    // Step 1: Find the merge-base SHA between old_base_ref and HEAD
     let merge_base_output = Command::new("git")
-        .args(["-C", worktree_path, "merge-base", base_branch, "HEAD"])
+        .args(["-C", worktree_path, "merge-base", old_base_ref, "HEAD"])
         .output()
         .map_err(|e| AppError::Custom(format!("Failed to run git merge-base: {}", e)))?;
 
@@ -238,7 +353,8 @@ pub fn rebase_onto_master(_repo_path: &str, worktree_path: &str, base_branch: &s
         let stderr = String::from_utf8_lossy(&merge_base_output.stderr).to_string();
         return Ok(MergeResult {
             success: false,
-            message: format!("Could not find merge-base between '{}' and HEAD: {}", base_branch, stderr.trim()),
+            has_conflicts: false,
+            message: format!("Could not find merge-base between '{}' and HEAD: {}", old_base_ref, stderr.trim()),
         });
     }
 
@@ -246,7 +362,8 @@ pub fn rebase_onto_master(_repo_path: &str, worktree_path: &str, base_branch: &s
     if merge_base_sha.is_empty() {
         return Ok(MergeResult {
             success: false,
-            message: format!("No common ancestor found between '{}' and HEAD.", base_branch),
+            has_conflicts: false,
+            message: format!("No common ancestor found between '{}' and HEAD.", old_base_ref),
         });
     }
 
@@ -258,18 +375,21 @@ pub fn rebase_onto_master(_repo_path: &str, worktree_path: &str, base_branch: &s
 
     let current_branch = String::from_utf8_lossy(&branch_output.stdout).trim().to_string();
 
-    // Step 3: git rebase --onto master <merge_base_sha> <current_branch>
+    // Step 3: git rebase --onto <onto_ref> <merge_base_sha> <current_branch>
     let output = Command::new("git")
-        .args(["-C", worktree_path, "rebase", "--onto", "master", &merge_base_sha, &current_branch])
+        .args(["-C", worktree_path, "rebase", "--onto", onto_ref, &merge_base_sha, &current_branch])
         .output()
         .map_err(|e| AppError::Custom(format!("Failed to run git rebase: {}", e)))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{}\n{}", stderr, stdout);
+    let has_conflicts = combined.contains("could not apply") || combined.contains("CONFLICT");
 
     if output.status.success() {
         Ok(MergeResult {
             success: true,
+            has_conflicts: false,
             message: if stdout.trim().is_empty() {
                 "Rebase completed successfully.".to_string()
             } else {
@@ -287,13 +407,13 @@ pub fn rebase_onto_master(_repo_path: &str, worktree_path: &str, base_branch: &s
 
         Ok(MergeResult {
             success: false,
+            has_conflicts,
             message,
         })
     }
 }
 
 pub fn merge_base_branch(_repo_path: &str, worktree_path: &str, base_branch: &str) -> Result<MergeResult, AppError> {
-    // Shell out to git merge for robustness (handles conflicts, hooks, etc.)
     let output = Command::new("git")
         .args(["-C", worktree_path, "merge", base_branch])
         .output()
@@ -301,10 +421,13 @@ pub fn merge_base_branch(_repo_path: &str, worktree_path: &str, base_branch: &st
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{}\n{}", stderr, stdout);
+    let has_conflicts = combined.contains("CONFLICT");
 
     if output.status.success() {
         Ok(MergeResult {
             success: true,
+            has_conflicts: false,
             message: if stdout.trim().is_empty() {
                 "Merge completed successfully.".to_string()
             } else {
@@ -312,7 +435,6 @@ pub fn merge_base_branch(_repo_path: &str, worktree_path: &str, base_branch: &st
             },
         })
     } else {
-        // Merge failed (conflicts or other error)
         let message = if !stderr.trim().is_empty() {
             stderr.trim().to_string()
         } else if !stdout.trim().is_empty() {
@@ -323,7 +445,143 @@ pub fn merge_base_branch(_repo_path: &str, worktree_path: &str, base_branch: &st
 
         Ok(MergeResult {
             success: false,
+            has_conflicts,
             message,
         })
     }
+}
+
+fn run_git_rebase_action(worktree_path: &str, action: &str) -> Result<MergeResult, AppError> {
+    let output = Command::new("git")
+        .args(["-C", worktree_path, "rebase", action])
+        .output()
+        .map_err(|e| AppError::Custom(format!("Failed to run git rebase {}: {}", action, e)))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{}\n{}", stderr, stdout);
+    let has_conflicts = combined.contains("could not apply") || combined.contains("CONFLICT");
+
+    if output.status.success() {
+        Ok(MergeResult {
+            success: true,
+            has_conflicts: false,
+            message: if action == "--abort" {
+                "Rebase aborted.".to_string()
+            } else if action == "--skip" {
+                "Commit skipped.".to_string()
+            } else {
+                "Rebase continued.".to_string()
+            },
+        })
+    } else {
+        let message = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            format!("git rebase {} failed.", action)
+        };
+
+        Ok(MergeResult {
+            success: false,
+            has_conflicts,
+            message,
+        })
+    }
+}
+
+pub fn rebase_continue(worktree_path: &str) -> Result<MergeResult, AppError> {
+    run_git_rebase_action(worktree_path, "--continue")
+}
+
+pub fn rebase_skip(worktree_path: &str) -> Result<MergeResult, AppError> {
+    run_git_rebase_action(worktree_path, "--skip")
+}
+
+pub fn rebase_abort(worktree_path: &str) -> Result<MergeResult, AppError> {
+    run_git_rebase_action(worktree_path, "--abort")
+}
+
+pub fn repair_worktrees(repo_path: &str) -> Result<String, AppError> {
+    let mut messages = Vec::new();
+
+    // Step 1: Find worktrees whose directories no longer exist and prune them
+    if let Ok(repo) = Repository::open(repo_path) {
+        if let Ok(worktrees) = repo.worktrees() {
+            let mut pruned = Vec::new();
+            for name in worktrees.iter().flatten() {
+                if let Ok(wt) = repo.find_worktree(name) {
+                    let wt_path = wt.path().to_string_lossy().to_string();
+                    if !std::path::Path::new(&wt_path).exists() {
+                        // Get the branch before pruning so we can clean up metadata
+                        let branch = get_worktree_branch(repo_path, name);
+                        pruned.push((name.to_string(), branch));
+                    }
+                }
+            }
+
+            if !pruned.is_empty() {
+                // `git worktree prune` removes entries for worktrees whose directories are gone
+                let prune_output = Command::new("git")
+                    .args(["-C", repo_path, "worktree", "prune"])
+                    .output()
+                    .map_err(|e| AppError::Custom(format!("Failed to run git worktree prune: {}", e)))?;
+
+                if prune_output.status.success() {
+                    for (name, branch) in &pruned {
+                        let _ = metadata::remove_worktree_meta(repo_path, name, branch.as_deref());
+                        messages.push(format!("Pruned missing worktree: {}", name));
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 2: Repair from main repo (fixes main -> worktree links)
+    let output = Command::new("git")
+        .args(["-C", repo_path, "worktree", "repair"])
+        .output()
+        .map_err(|e| AppError::Custom(format!("Failed to run git worktree repair: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(AppError::Custom(
+            if !stderr.trim().is_empty() { stderr.trim().to_string() }
+            else { "git worktree repair failed.".to_string() }
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !stdout.trim().is_empty() {
+        messages.push(stdout.trim().to_string());
+    }
+
+    // Step 3: Repair from each remaining worktree directory (fixes worktree -> main links)
+    if let Ok(repo) = Repository::open(repo_path) {
+        if let Ok(worktrees) = repo.worktrees() {
+            for name in worktrees.iter().flatten() {
+                if let Ok(wt) = repo.find_worktree(name) {
+                    let wt_path = wt.path().to_string_lossy().to_string();
+                    if std::path::Path::new(&wt_path).exists() {
+                        let wt_output = Command::new("git")
+                            .args(["-C", &wt_path, "worktree", "repair"])
+                            .output();
+                        if let Ok(o) = wt_output {
+                            let s = String::from_utf8_lossy(&o.stdout).to_string();
+                            if !s.trim().is_empty() {
+                                messages.push(s.trim().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(if messages.is_empty() {
+        "All worktrees repaired successfully.".to_string()
+    } else {
+        messages.join("\n")
+    })
 }
