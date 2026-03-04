@@ -3,7 +3,7 @@ mod error;
 mod git;
 mod models;
 
-use commands::{open, repo_info, scan, worktree};
+use commands::{github, open, repo_info, scan, stack, worktree};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -28,11 +28,30 @@ pub fn run() {
             worktree::merge_base_branch,
             worktree::rebase_onto_master,
             worktree::set_base_branch,
+            worktree::rebase_continue,
+            worktree::rebase_skip,
+            worktree::rebase_abort,
+            worktree::repair_worktrees,
             repo_info::list_branches,
+            stack::list_stacks,
+            stack::get_stack_details,
+            stack::create_stack,
+            stack::add_branch_to_stack,
+            stack::remove_branch_from_stack,
+            stack::delete_stack,
+            stack::rename_stack,
+            stack::cascade_rebase,
+            stack::split_into_stack,
+            github::check_gh_available,
+            github::get_stack_pr_statuses,
+            github::create_stack_prs,
+            github::update_stack_pr_bases,
+            github::push_stack,
             open::open_in_vscode,
             open::open_in_visual_studio,
             open::open_in_explorer,
-            open::open_in_terminal,
+            open::open_terminal_tool,
+            open::open_claude_split,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
