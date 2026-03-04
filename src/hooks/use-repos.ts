@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { scanRepos } from "@/lib/tauri";
 
 export function useRepos(rootPath: string | null) {
@@ -6,5 +6,6 @@ export function useRepos(rootPath: string | null) {
     queryKey: ["repos", rootPath],
     queryFn: () => scanRepos(rootPath!),
     enabled: !!rootPath,
+    placeholderData: keepPreviousData,
   });
 }

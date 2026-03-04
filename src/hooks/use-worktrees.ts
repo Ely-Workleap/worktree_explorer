@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import {
   listWorktrees,
   createWorktree,
@@ -6,6 +6,10 @@ import {
   mergeBaseBranch,
   rebaseOntoMaster,
   setBaseBranch,
+  rebaseContinue,
+  rebaseSkip,
+  rebaseAbort,
+  repairWorktrees,
 } from "@/lib/tauri";
 import type { CreateWorktreeRequest } from "@/types";
 
@@ -14,6 +18,9 @@ export function useWorktrees(repoPath: string | null) {
     queryKey: ["worktrees", repoPath],
     queryFn: () => listWorktrees(repoPath!),
     enabled: !!repoPath,
+    placeholderData: keepPreviousData,
+    refetchInterval: 5000,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -104,6 +111,41 @@ export function useSetBaseBranch() {
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({
         queryKey: ["worktrees", variables.repoPath],
+      });
+    },
+  });
+}
+
+export function useRebaseAction() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      worktreePath,
+      action,
+    }: {
+      repoPath: string;
+      worktreePath: string;
+      action: "continue" | "skip" | "abort";
+    }) => {
+      if (action === "continue") return rebaseContinue(worktreePath);
+      if (action === "skip") return rebaseSkip(worktreePath);
+      return rebaseAbort(worktreePath);
+    },
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({
+        queryKey: ["worktrees", variables.repoPath],
+      });
+    },
+  });
+}
+
+export function useRepairWorktrees() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (repoPath: string) => repairWorktrees(repoPath),
+    onSuccess: (_data, repoPath) => {
+      queryClient.invalidateQueries({
+        queryKey: ["worktrees", repoPath],
       });
     },
   });
