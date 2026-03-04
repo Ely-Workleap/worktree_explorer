@@ -169,7 +169,21 @@ r#"Split the branch '{branch}' in '{repo}' into a stacked PR chain. Follow these
 
 6. JIRA: Extract the Jira ticket ID from the branch name (e.g. SGD-12345). Title each PR as 'SGD-12345 Part N: <description>'. Create a Jira subtask under the parent ticket for each part using the Atlassian MCP tool.
 
-7. VERIFY: Check each branch has the expected changes and no overlap with other groups."#,
+7. VERIFY: Check each branch has the expected changes and no overlap with other groups.
+
+8. TEST REPORT: For each PR in the stack, assess whether tests are needed:
+   - Check if the PR touches logic that has existing tests or should have tests (business logic, utils, API endpoints, hooks)
+   - Check if there are existing test files nearby (*.test.ts, *.spec.ts, __tests__/) that should be updated
+   - PRs that are pure config, type-only, or styling changes may not need tests
+   At the end, print a summary report like:
+   ```
+   === Test Coverage Report ===
+   Part 1 (models/types): No tests needed - type definitions only
+   Part 2 (API endpoints): TESTS NEEDED - new endpoint logic, no tests found
+   Part 3 (UI components): TESTS NEEDED - component has user interactions
+   Part 4 (config): No tests needed - build config only
+   ```
+   Flag any PR that needs tests but has none so they can be addressed before merging."#,
         branch = branch_name,
         repo = repo_path,
     )
