@@ -16,6 +16,14 @@ import {
   ChevronDown,
   IterationCcw,
   Pencil,
+  Bot,
+  Sparkles,
+  Scissors,
+  AlertTriangle,
+  SkipForward,
+  XCircle,
+  Play,
+  Pin,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -31,41 +39,48 @@ import {
 } from "@/components/ui/popover";
 import { BranchCombobox } from "./BranchCombobox";
 import { DeleteWorktreeDialog } from "./DeleteWorktreeDialog";
-import { openInVscode, openInVisualStudio, openInExplorer, openInTerminal } from "@/lib/tauri";
-import { useMergeBase, useRebaseOntoMaster, useSetBaseBranch } from "@/hooks/use-worktrees";
+import { openInVscode, openInVisualStudio, openInExplorer, openTerminalTool, openClaudeSplit } from "@/lib/tauri";
+import { useMergeBase, useRebaseOntoMaster, useSetBaseBranch, useRebaseAction } from "@/hooks/use-worktrees";
 import { useBranches } from "@/hooks/use-branches";
-import type { WorktreeInfo } from "@/types";
+import type { WorktreeInfo, MergeResult } from "@/types";
 
 interface WorktreeCardProps {
   worktree: WorktreeInfo;
   repoPath: string;
+  isPinned: boolean;
+  onTogglePin: () => void;
 }
 
-export function WorktreeCard({ worktree, repoPath }: WorktreeCardProps) {
+export function WorktreeCard({ worktree, repoPath, isPinned, onTogglePin }: WorktreeCardProps) {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [gitMenuOpen, setGitMenuOpen] = useState(false);
+  const [terminalMenuOpen, setTerminalMenuOpen] = useState(false);
   const [baseBranchPickerOpen, setBaseBranchPickerOpen] = useState(false);
   const [selectedBase, setSelectedBase] = useState("");
   const [resultMessage, setResultMessage] = useState<{
     success: boolean;
+    hasConflicts: boolean;
     text: string;
   } | null>(null);
   const mergeMutation = useMergeBase();
   const rebaseMutation = useRebaseOntoMaster();
   const setBaseMutation = useSetBaseBranch();
+  const rebaseActionMutation = useRebaseAction();
   const { data: branches } = useBranches(baseBranchPickerOpen ? repoPath : null);
 
   const localBranches = branches?.filter((b) => !b.is_remote) ?? [];
   const branchDisplay = worktree.branch ?? "(detached)";
-  const isGitBusy = mergeMutation.isPending || rebaseMutation.isPending;
+  const isGitBusy = mergeMutation.isPending || rebaseMutation.isPending || rebaseActionMutation.isPending;
+  const showRebaseActions = worktree.is_rebasing || resultMessage?.hasConflicts;
 
-  const handleGitResult = (result: { success: boolean; message: string }) => {
-    setResultMessage({ success: result.success, text: result.message });
+  const handleGitResult = (result: MergeResult) => {
+    setResultMessage({ success: result.success, hasConflicts: result.has_conflicts, text: result.message });
   };
 
   const handleGitError = (error: unknown) => {
     setResultMessage({
       success: false,
+      hasConflicts: false,
       text: (error as Error).message,
     });
   };
@@ -98,6 +113,14 @@ export function WorktreeCard({ worktree, repoPath }: WorktreeCardProps) {
     );
   };
 
+  const handleRebaseAction = (action: "continue" | "skip" | "abort") => {
+    setResultMessage(null);
+    rebaseActionMutation.mutate(
+      { repoPath, worktreePath: worktree.path, action },
+      { onSuccess: handleGitResult, onError: handleGitError },
+    );
+  };
+
   const handleSetBaseBranch = (branchName: string) => {
     if (!branchName) return;
     setBaseMutation.mutate(
@@ -115,8 +138,13 @@ export function WorktreeCard({ worktree, repoPath }: WorktreeCardProps) {
     );
   };
 
+  const handleOpenTool = (tool: "claude" | "codex" | "lazygit") => {
+    setTerminalMenuOpen(false);
+    openTerminalTool(worktree.path, worktree.name, tool);
+  };
+
   return (
-    <div className="rounded-lg border bg-card p-3 shadow-sm">
+    <div className={`rounded-lg border p-3 shadow-sm ${isPinned ? "border-primary/30 bg-primary/5" : "bg-card"}`}>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -165,6 +193,11 @@ export function WorktreeCard({ worktree, repoPath }: WorktreeCardProps) {
                 </PopoverContent>
               </Popover>
             ) : null}
+            {worktree.stack_name && (
+              <Badge variant="outline" className="text-[10px] border-primary/30 text-primary">
+                {worktree.stack_name}
+              </Badge>
+            )}
             {worktree.is_main && (
               <Badge variant="secondary" className="text-[10px]">
                 main
@@ -175,6 +208,15 @@ export function WorktreeCard({ worktree, repoPath }: WorktreeCardProps) {
             )}
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            {worktree.is_rebasing && (
+              <Badge
+                variant="outline"
+                className="gap-1 border-red-500/50 text-red-600"
+              >
+                <AlertTriangle className="h-2.5 w-2.5" />
+                Rebase in progress
+              </Badge>
+            )}
             {worktree.is_dirty ? (
               <Badge
                 variant="outline"
@@ -210,6 +252,19 @@ export function WorktreeCard({ worktree, repoPath }: WorktreeCardProps) {
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                onClick={onTogglePin}
+              >
+                <Pin className={`h-4 w-4 ${isPinned ? "fill-current text-foreground" : "text-muted-foreground"}`} />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{isPinned ? "Unpin" : "Pin to top"}</TooltipContent>
+          </Tooltip>
           {worktree.base_branch && (
             <Popover open={gitMenuOpen} onOpenChange={setGitMenuOpen}>
               <Tooltip>
@@ -301,19 +356,59 @@ export function WorktreeCard({ worktree, repoPath }: WorktreeCardProps) {
             </TooltipTrigger>
             <TooltipContent>Open in Explorer</TooltipContent>
           </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8"
-                onClick={() => openInTerminal(worktree.path)}
+          <Popover open={terminalMenuOpen} onOpenChange={setTerminalMenuOpen}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <PopoverTrigger asChild>
+                  <Button variant="ghost" size="icon" className="h-8 w-8">
+                    <div className="flex items-center">
+                      <Terminal className="h-3.5 w-3.5" />
+                      <ChevronDown className="h-2.5 w-2.5" />
+                    </div>
+                  </Button>
+                </PopoverTrigger>
+              </TooltipTrigger>
+              <TooltipContent>Terminal tools</TooltipContent>
+            </Tooltip>
+            <PopoverContent className="w-48 p-1">
+              <button
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                onClick={() => handleOpenTool("claude")}
               >
-                <Terminal className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Open in Terminal</TooltipContent>
-          </Tooltip>
+                <Bot className="h-4 w-4" />
+                Claude
+              </button>
+              <button
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                onClick={() => handleOpenTool("codex")}
+              >
+                <Sparkles className="h-4 w-4" />
+                Codex
+              </button>
+              <button
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                onClick={() => handleOpenTool("lazygit")}
+              >
+                <GitBranch className="h-4 w-4" />
+                Lazygit
+              </button>
+              {!worktree.is_main && (
+                <>
+                  <div className="my-1 border-t" />
+                  <button
+                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                    onClick={() => {
+                      setTerminalMenuOpen(false);
+                      openClaudeSplit(worktree.path, worktree.name, repoPath, worktree.branch ?? worktree.name);
+                    }}
+                  >
+                    <Scissors className="h-4 w-4" />
+                    Split with Claude
+                  </button>
+                </>
+              )}
+            </PopoverContent>
+          </Popover>
           {!worktree.is_main && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -337,6 +432,41 @@ export function WorktreeCard({ worktree, repoPath }: WorktreeCardProps) {
         >
           {resultMessage.text}
         </p>
+      )}
+      {showRebaseActions && (
+        <div className="mt-2 flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">Rebase:</span>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 gap-1 px-2 text-xs"
+            disabled={isGitBusy}
+            onClick={() => handleRebaseAction("continue")}
+          >
+            <Play className="h-3 w-3" />
+            Continue
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 gap-1 px-2 text-xs"
+            disabled={isGitBusy}
+            onClick={() => handleRebaseAction("skip")}
+          >
+            <SkipForward className="h-3 w-3" />
+            Skip
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 gap-1 px-2 text-xs text-destructive hover:text-destructive"
+            disabled={isGitBusy}
+            onClick={() => handleRebaseAction("abort")}
+          >
+            <XCircle className="h-3 w-3" />
+            Abort
+          </Button>
+        </div>
       )}
       <DeleteWorktreeDialog
         open={deleteOpen}

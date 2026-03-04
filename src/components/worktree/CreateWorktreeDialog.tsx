@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   Dialog,
   DialogContent,
@@ -10,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
 import {
   Select,
   SelectContent,
@@ -21,33 +23,87 @@ import { BranchCombobox } from "./BranchCombobox";
 import { useBranches } from "@/hooks/use-branches";
 import { useCreateWorktree } from "@/hooks/use-worktrees";
 
+interface ProgressEvent {
+  step: number;
+  total: number;
+  message: string;
+}
+
 interface CreateWorktreeDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   repoPath: string;
+  onCreated?: (name: string) => void;
 }
 
 export function CreateWorktreeDialog({
   open,
   onOpenChange,
   repoPath,
+  onCreated,
 }: CreateWorktreeDialogProps) {
   const [name, setName] = useState("");
+  const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
   const [branchMode, setBranchMode] = useState<"existing" | "new">("new");
   const [selectedBranch, setSelectedBranch] = useState("");
   const [newBranchName, setNewBranchName] = useState("");
   const [baseBranch, setBaseBranch] = useState("");
 
+  // Derive a worktree name from a branch name: "feature/my-thing" -> "my-thing"
+  const deriveNameFromBranch = (branch: string) => {
+    const lastSegment = branch.split("/").pop() ?? branch;
+    return lastSegment;
+  };
+
+  const handleBranchChange = (branch: string, setter: (v: string) => void) => {
+    setter(branch);
+    if (!nameManuallyEdited) {
+      setName(deriveNameFromBranch(branch));
+    }
+  };
+
+  const [progress, setProgress] = useState<ProgressEvent | null>(null);
+
   const { data: branches } = useBranches(open ? repoPath : null);
   const createMutation = useCreateWorktree();
 
   const localBranches = branches?.filter((b) => !b.is_remote) ?? [];
+  const allBranches = branches ?? [];
+
+  // Default base branch to master or main
+  const defaultBaseBranch = useMemo(() => {
+    const names = localBranches.map((b) => b.name);
+    if (names.includes("master")) return "master";
+    if (names.includes("main")) return "main";
+    return "";
+  }, [localBranches]);
+
+  useEffect(() => {
+    if (open && !baseBranch) {
+      setBaseBranch(defaultBaseBranch);
+    }
+  }, [open, defaultBaseBranch]);
+
+  // Listen for progress events from the backend
+  useEffect(() => {
+    if (!createMutation.isPending) {
+      setProgress(null);
+      return;
+    }
+    const unlisten = listen<ProgressEvent>("create-worktree-progress", (event) => {
+      setProgress(event.payload);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [createMutation.isPending]);
 
   const resetForm = () => {
     setName("");
+    setNameManuallyEdited(false);
     setSelectedBranch("");
     setNewBranchName("");
-    setBaseBranch("");
+    setBaseBranch(defaultBaseBranch);
   };
 
   const handleCreate = () => {
@@ -64,6 +120,7 @@ export function CreateWorktreeDialog({
       },
       {
         onSuccess: () => {
+          onCreated?.(name);
           onOpenChange(false);
           resetForm();
         },
@@ -87,7 +144,10 @@ export function CreateWorktreeDialog({
               id="wt-name"
               placeholder="e.g., feature-auth"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                setName(e.target.value);
+                setNameManuallyEdited(true);
+              }}
             />
           </div>
           <div className="space-y-2">
@@ -115,13 +175,13 @@ export function CreateWorktreeDialog({
                   id="new-branch"
                   placeholder="e.g., feature/my-feature"
                   value={newBranchName}
-                  onChange={(e) => setNewBranchName(e.target.value)}
+                  onChange={(e) => handleBranchChange(e.target.value, setNewBranchName)}
                 />
               </div>
               <div className="space-y-2">
                 <Label>Base Branch</Label>
                 <BranchCombobox
-                  branches={localBranches}
+                  branches={allBranches}
                   value={baseBranch}
                   onValueChange={setBaseBranch}
                   placeholder="HEAD (default)"
@@ -136,16 +196,34 @@ export function CreateWorktreeDialog({
             <div className="space-y-2">
               <Label>Select Branch</Label>
               <BranchCombobox
-                branches={localBranches}
+                branches={allBranches}
                 value={selectedBranch}
-                onValueChange={setSelectedBranch}
+                onValueChange={(v) => handleBranchChange(v, setSelectedBranch)}
                 placeholder="Choose a branch..."
               />
             </div>
           )}
         </div>
+        {createMutation.isPending && progress && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">{progress.message}</span>
+              <span className="text-muted-foreground">
+                {progress.step}/{progress.total}
+              </span>
+            </div>
+            <Progress value={progress.step} max={progress.total} />
+          </div>
+        )}
+        {createMutation.isError && (
+          <p className="text-sm text-destructive">
+            {createMutation.error instanceof Error
+              ? createMutation.error.message
+              : String(createMutation.error)}
+          </p>
+        )}
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={createMutation.isPending}>
             Cancel
           </Button>
           <Button
@@ -159,11 +237,6 @@ export function CreateWorktreeDialog({
             {createMutation.isPending ? "Creating..." : "Create"}
           </Button>
         </DialogFooter>
-        {createMutation.isError && (
-          <p className="text-sm text-destructive">
-            {(createMutation.error as Error).message}
-          </p>
-        )}
       </DialogContent>
     </Dialog>
   );

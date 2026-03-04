@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Search, GitFork, FolderOpen } from "lucide-react";
+import { Search, GitFork, FolderOpen, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
@@ -49,10 +49,18 @@ export function Sidebar({
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder="Search repos..."
-            className="pl-8"
+            className="pl-8 pr-8"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
+          {search && (
+            <button
+              onClick={() => setSearch("")}
+              className="absolute right-2 top-2.5 text-muted-foreground hover:text-foreground"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
       </div>
       <ScrollArea className="flex-1">
