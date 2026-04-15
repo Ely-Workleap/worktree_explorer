@@ -9,6 +9,8 @@ import {
   Pencil,
   Check,
   X,
+  Bot,
+  XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -22,7 +24,10 @@ import { StackBranchRow } from "./StackBranchRow";
 import { AddBranchDialog } from "./AddBranchDialog";
 import { DeleteStackDialog } from "./DeleteStackDialog";
 import { useStackDetails, useCascadeRebase, useRenameStack, useRemoveBranchFromStack } from "@/hooks/use-stacks";
+import { useRebaseAction } from "@/hooks/use-worktrees";
 import { useGhAvailable, useStackPrStatuses, useCreateStackPrs, useUpdateStackPrBases, usePushStack } from "@/hooks/use-github";
+import { openClaudeCascadeResolve } from "@/lib/tauri";
+import { useBuildConfig } from "@/hooks/use-build";
 import type { StackInfo, CascadeRebaseResult } from "@/types";
 
 interface StackCardProps {
@@ -38,6 +43,7 @@ export function StackCard({ stack, repoPath }: StackCardProps) {
   const [rebaseResult, setRebaseResult] = useState<CascadeRebaseResult | null>(null);
 
   const { data: details } = useStackDetails(repoPath, stack.name);
+  const { data: buildConfig } = useBuildConfig(repoPath);
   const { data: ghAvailable } = useGhAvailable();
   const { data: prStatuses } = useStackPrStatuses(
     ghAvailable ? repoPath : null,
@@ -47,6 +53,7 @@ export function StackCard({ stack, repoPath }: StackCardProps) {
   const cascadeRebaseMutation = useCascadeRebase();
   const renameMutation = useRenameStack();
   const removeBranchMutation = useRemoveBranchFromStack();
+  const rebaseActionMutation = useRebaseAction();
   const createPrsMutation = useCreateStackPrs();
   const updatePrBasesMutation = useUpdateStackPrBases();
   const pushMutation = usePushStack();
@@ -156,6 +163,7 @@ export function StackCard({ stack, repoPath }: StackCardProps) {
             isLast={i === details.length - 1}
             prStatus={prStatuses?.[branch.branch]}
             onRemove={() => handleRemoveBranch(branch.branch)}
+            buildConfig={buildConfig}
           />
         ))}
       </div>
@@ -171,11 +179,57 @@ export function StackCard({ stack, repoPath }: StackCardProps) {
               {step.branch}: {step.message}
             </p>
           ))}
-          {rebaseResult.stopped_at && (
-            <p className="text-xs text-destructive font-medium">
-              Stopped at {rebaseResult.stopped_at} — resolve conflicts and continue.
-            </p>
-          )}
+          {rebaseResult.stopped_at && (() => {
+            const stoppedBranch = rebaseResult.stopped_at!;
+            const stoppedStep = rebaseResult.results.find(
+              (s) => s.branch === stoppedBranch,
+            );
+            const stoppedDetail = details?.find((d) => d.branch === stoppedBranch);
+
+            return (
+              <div className="flex items-center gap-2 pt-1">
+                <p className="text-xs text-destructive font-medium">
+                  Stopped at {stoppedBranch}
+                </p>
+                {stoppedStep?.has_conflicts && stoppedDetail?.worktree_path && stoppedDetail?.worktree_name && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 gap-1 px-2 text-xs"
+                    onClick={() =>
+                      openClaudeCascadeResolve(
+                        stoppedDetail.worktree_path!,
+                        stoppedDetail.worktree_name!,
+                        repoPath,
+                        stack.name,
+                        stoppedBranch,
+                      )
+                    }
+                  >
+                    <Bot className="h-3 w-3" />
+                    Resolve with Claude
+                  </Button>
+                )}
+                {stoppedDetail?.worktree_path && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 gap-1 px-2 text-xs text-destructive hover:text-destructive"
+                    onClick={() =>
+                      rebaseActionMutation.mutate({
+                        repoPath,
+                        worktreePath: stoppedDetail.worktree_path!,
+                        action: "abort",
+                      })
+                    }
+                  >
+                    <XCircle className="h-3 w-3" />
+                    Abort
+                  </Button>
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
 

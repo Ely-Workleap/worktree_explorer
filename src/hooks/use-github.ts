@@ -5,6 +5,8 @@ import {
   createStackPrs,
   updateStackPrBases,
   pushStack,
+  checkoutPrWorktree,
+  listPrWorktrees,
 } from "@/lib/tauri";
 
 export function useGhAvailable() {
@@ -74,6 +76,27 @@ export function usePushStack() {
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ["stack-details", variables.repoPath] });
       queryClient.invalidateQueries({ queryKey: ["worktrees", variables.repoPath] });
+    },
+  });
+}
+
+export function usePrWorktrees(repoPath: string | null) {
+  return useQuery({
+    queryKey: ["pr-worktrees", repoPath],
+    queryFn: () => listPrWorktrees(repoPath!),
+    enabled: !!repoPath,
+    refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
+  });
+}
+
+export function useCheckoutPrWorktree() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ repoPath, prNumber }: { repoPath: string; prNumber: number }) =>
+      checkoutPrWorktree(repoPath, prNumber),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["pr-worktrees", variables.repoPath] });
     },
   });
 }

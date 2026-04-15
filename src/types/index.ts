@@ -17,6 +17,7 @@ export interface WorktreeInfo {
   ahead: number;
   behind: number;
   file_changes: number;
+  created_at: number | null;
 }
 
 export interface MergeResult {
@@ -123,4 +124,24 @@ export interface SplitResult {
   branches_created: string[];
   worktrees_created: string[];
   backup_branch: string;
+}
+
+// --- Build config types ---
+
+export interface BuildConfig {
+  sln_path: string;
+  startup_exe: string;
+}
+
+// --- PR Review types ---
+
+export interface PrWorktreeInfo {
+  pr_number: number;
+  title: string;
+  url: string;
+  head_branch: string;
+  base_branch: string;
+  worktree_path: string;
+  worktree_name: string;
+  is_up_to_date: boolean | null;
 }

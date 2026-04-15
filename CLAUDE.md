@@ -23,7 +23,7 @@ Worktree Explorer is a Tauri v2 desktop app for managing Git worktrees and **sta
 - **`git/scanner.rs`** — Recursive repo discovery using walkdir. Skips: node_modules, target, .git, dist, build, .next, __pycache__, .venv, vendor
 - **`git/status.rs`** — Dirty check via `repo.statuses()`, ahead/behind via `graph_ahead_behind`
 - **`git/worktree_ops.rs`** — Worktree CRUD + merge/rebase. Worktrees created as sibling directories to the repo. Exports `rebase_onto()` helper for generic rebase operations.
-- **`git/metadata.rs`** — Reads/writes `.worktree-meta.json` V2 format at repo root. Handles auto-migration from V1. Stack CRUD functions.
+- **`git/metadata.rs`** — Reads/writes per-repo metadata JSON in the app data directory (`%LOCALAPPDATA%/com.worktreeexplorer.app/metadata/`). Uses `OnceLock` for path init. Auto-migrates legacy `.worktree-meta.json` from repo root on first read. Stack CRUD functions.
 - **`git/stack_ops.rs`** — Stack business logic: create/add/remove/delete stacks, cascade rebase, stack details with live status
 - **`git/split_ops.rs`** — Split plan execution: takes a structured plan and creates branches/worktrees/stack atomically with rollback
 - **`git/github.rs`** — GitHub integration via `gh` CLI: PR status, create PRs, update PR bases, force-push
@@ -71,9 +71,19 @@ Worktree Explorer is a Tauri v2 desktop app for managing Git worktrees and **sta
 | `open_in_explorer` | `explorer <path>` |
 | `open_terminal_tool` | Open Claude/Codex/Lazygit in new terminal |
 
-## Stack Metadata (`.worktree-meta.json`)
+## Stack Metadata
 
-The metadata file at the repo root uses V2 format (auto-migrates from V1):
+Metadata is stored in the **app data directory**, not in the repo. Each repo gets its own JSON file keyed by a hash of its canonical path:
+
+```
+%LOCALAPPDATA%/com.worktreeexplorer.app/metadata/
+  <hash>.json          # one per repo
+  _index.json          # maps hash -> repo path (for debugging)
+```
+
+Legacy `.worktree-meta.json` files at repo roots are auto-migrated on first read (imported then deleted).
+
+The V2 JSON format:
 
 ```json
 {
@@ -110,24 +120,7 @@ To create a stack manually without the GUI:
    git -C <repo> worktree add ../wt-part2 feature/part2
    ```
 
-2. **Update `.worktree-meta.json`** in the repo root:
-   ```json
-   {
-     "version": 2,
-     "worktrees": {
-       "wt-part1": { "base_branch": "master" },
-       "wt-part2": { "base_branch": "feature/part1" }
-     },
-     "stacks": {
-       "my-stack": {
-         "name": "my-stack",
-         "root_branch": "master",
-         "branches": ["feature/part1", "feature/part2"],
-         "pr_numbers": {}
-       }
-     }
-   }
-   ```
+2. **Register in the Worktree Explorer app** — the app stores metadata in its own data directory (`%LOCALAPPDATA%/com.worktreeexplorer.app/metadata/`). Open the app and use the Stacks UI to create the stack and assign branches. Alternatively, if running from within the Tauri app, the `create_stack` and `add_branch_to_stack` commands handle this automatically.
 
 3. **Cascade rebase** (after root branch updates):
    ```bash
@@ -149,7 +142,7 @@ Key rules:
 - `branches` array is ordered bottom-to-top (index 0 = closest to root)
 - Each branch's base = previous branch in the array (or `root_branch` for index 0)
 - Worktree names in `worktrees` must match the git worktree name
-- The app auto-migrates V1 format (flat `{ "wt-name": "base-branch" }`) to V2 on next read
+- The app auto-migrates legacy `.worktree-meta.json` from repo root on first read (imports then deletes)
 
 ### Auto-splitting a worktree into a stacked PR chain
 
@@ -167,17 +160,24 @@ When asked to split a worktree (or branch) into a stack of smaller PRs, follow t
 
 Read the diffs and group changes by logical concern. Use these categories in **dependency order** (earlier groups must not depend on later ones):
 
-1. **Infrastructure/config** — `package.json`, `Cargo.toml`, CI files, build scripts
-2. **Schema/migrations/models** — database migrations, data model changes, type definitions
-3. **Shared utilities/helpers** — new utility functions, shared modules
-4. **Core business logic** — backend logic, API endpoints, service layer
-5. **UI/presentation layer** — components, styles, frontend routing
+1. **Infrastructure/config** — `.csproj` files, NuGet packages, CI files, build scripts, `Program.cs` / DI registration changes
+2. **Schema/migrations/models** — EF migrations, entity classes, DTOs, enums, interfaces, value objects
+3. **Shared utilities/helpers** — extension methods, shared services, base classes, common attributes
+4. **Core business logic** — domain services, handlers, repositories, API controllers
+5. **UI/presentation layer** — Razor views, Blazor components, frontend assets
 6. **Tests** — test files for the above categories
 
 For **Scenario A**: map each commit SHA to a group based on what it changes.
 For **Scenario B**: map each file path to a group based on its category.
 
 **Shared file rule:** If a file is needed by multiple groups, place it in the **earliest** group.
+
+**Compilability rule:** Every PR in the stack must compile and build successfully on its own (i.e., when checked out independently on top of its base branch). When grouping:
+- If a group adds code that references types/classes/interfaces from a later group, pull those dependencies into the current group or an earlier one.
+- If moving a dependency earlier would bloat that group, consider merging the two groups instead.
+- Run `dotnet build` in each worktree to verify compilation (adapt to the project's build system if different).
+- Include any necessary `using` directives, project references, or namespace updates so the compiler finds everything.
+- Watch out for partial classes, extension methods, and DI registrations that may span multiple files — keep them together or ensure the earlier group has everything needed to compile.
 
 #### Step 3 — Propose
 
@@ -188,6 +188,11 @@ Present the split plan to the user before executing. Include:
   - Worktree name (e.g., `wt-ticket-123-part1`)
   - Description (will become the commit message for Scenario B)
   - List of commits (Scenario A) or files (Scenario B)
+
+**Forward-reference rule for foundational PRs:** If a group only introduces types, enums, structs, or classes that are **not yet consumed** within that same PR, the description **must** explain where they will be used in later PRs of the stack. Example:
+> "Add `PrStatus` enum and `StackBranchInfo` struct — these are used by the stack details query in PR #3 and the UI in PR #4."
+
+This gives reviewers context for why the code exists even though nothing calls it yet.
 
 **Wait for user confirmation before proceeding.**
 
@@ -238,14 +243,15 @@ git -C ../<wt_name> add -A
 git -C ../<wt_name> commit -m "<description>"
 ```
 
-Then update `.worktree-meta.json` manually (see "Creating a stack from the CLI" above).
+Then register the stack in the Worktree Explorer app (see "Creating a stack from the CLI" above).
 
 #### Step 5 — Verify
 
-After execution, verify each branch:
+After execution, verify **each** branch compiles and is correct:
 1. Has the expected file changes (`git -C <wt_path> diff --stat <base>`)
 2. Does not contain changes that belong to other groups
-3. Compiles independently (if applicable — run build/typecheck per worktree)
+3. **Must compile independently** — run `dotnet build` (or the project's build command) in each worktree. If a branch fails to compile, fix it before proceeding (add missing `using` directives, move dependencies to an earlier group, add project references, etc.)
+4. For foundational PRs (types/enums only), confirm the description references which later PRs consume them
 
 #### Step 6 — Push/PR (optional)
 
@@ -257,17 +263,37 @@ git -C <wt1> push --force-with-lease origin <branch1>
 git -C <wt2> push --force-with-lease origin <branch2>
 
 # Create PRs with correct base chain
-gh pr create --base master --head <branch1> --title "Part 1: ..."
-gh pr create --base <branch1> --head <branch2> --title "Part 2: ..."
+gh pr create --base master --head <branch1> --title "Part 1: ..." --body "..."
+gh pr create --base <branch1> --head <branch2> --title "Part 2: ..." --body "..."
 ```
 
 Or use the existing stack commands: `push_stack` then `create_stack_prs`.
+
+**Stack navigation in PR descriptions:** Every PR body **must** include a navigation section at the top listing all PRs in the stack with clickable links. The current PR is marked with an arrow. Use this format:
+
+```markdown
+## Stack
+
+| | PR | Description |
+|---|---|---|
+| | [#101 — Part 1: Add domain models](https://github.com/org/repo/pull/101) | Enums, DTOs, entities |
+| **-->** | **#102 — Part 2: Add service layer** *(this PR)* | Handlers and repositories |
+| | [#103 — Part 3: Add API controllers](https://github.com/org/repo/pull/103) | REST endpoints |
+
+---
+```
+
+**Creation flow** (PRs must be created bottom-to-top so earlier PR numbers are known):
+1. Create all PRs in stack order (PR 1 first, then PR 2, etc.) — capture each PR URL from `gh pr create` output.
+2. After all PRs exist, update every PR body with `gh pr edit <number> --body "..."` to inject the full navigation table with all links.
+
+For foundational PRs (types/enums only), the description column should note what later PRs consume them, e.g.: "Enums and DTOs — used by service layer in #102 and controllers in #103".
 
 #### Safety rules
 
 - **Always backup first** — the command creates `backup/<source_branch>` automatically
 - **Never auto-resolve conflicts** — if cherry-pick or checkout fails, rollback and report
-- **Each branch must compile alone** — shared dependencies go in the earliest group
+- **Each branch must compile alone** — shared dependencies go in the earliest group. Run `dotnet build` per worktree and fix any errors before moving on
 - **Files shared across groups go in the earliest group** — later groups depend on earlier ones
 - **Rollback on failure** — if any step fails, all created worktrees and branches are removed
 - **Don't mix scenarios** — each group uses either `commits` OR `files`, never both
@@ -278,7 +304,7 @@ Or use the existing stack commands: `push_stack` then `create_stack_prs`.
 - git2's `Worktree::is_locked()` returns `Result<WorktreeLockStatus, Error>` not `bool` — use `.map(|s| !matches!(s, WorktreeLockStatus::Unlocked)).unwrap_or(false)`
 - Tauri window may not show on launch — force `win.show()` + `win.set_focus()` in `setup()` callback
 - For scrollable flex layouts, use `min-h-0 flex-1 overflow-y-auto` (not Radix ScrollArea)
-- Git doesn't track parent branches — we store this in `.worktree-meta.json` at repo root
+- Git doesn't track parent branches — we store this in per-repo metadata in the app data directory (not in the repo itself)
 - Merge/rebase uses `git` CLI (`std::process::Command`) rather than git2's low-level API for robustness
 - `rebase_onto(worktree_path, onto_ref, old_base_ref)` is the generic rebase helper used by both single-worktree rebase and cascade rebase
 - GitHub integration shells out to `gh` CLI (same pattern as using git CLI for complex ops)

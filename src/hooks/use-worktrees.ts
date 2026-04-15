@@ -10,6 +10,7 @@ import {
   rebaseSkip,
   rebaseAbort,
   repairWorktrees,
+  batchDeleteWorktrees,
 } from "@/lib/tauri";
 import type { CreateWorktreeRequest } from "@/types";
 
@@ -135,6 +136,28 @@ export function useRebaseAction() {
       queryClient.invalidateQueries({
         queryKey: ["worktrees", variables.repoPath],
       });
+    },
+  });
+}
+
+export function useBatchDeleteWorktrees() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      repoPath,
+      worktreeNames,
+      checkoutMain,
+    }: {
+      repoPath: string;
+      worktreeNames: string[];
+      checkoutMain: boolean;
+    }) => batchDeleteWorktrees(repoPath, worktreeNames, checkoutMain),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({
+        queryKey: ["worktrees", variables.repoPath],
+      });
+      queryClient.invalidateQueries({ queryKey: ["repos"] });
+      queryClient.invalidateQueries({ queryKey: ["stacks"] });
     },
   });
 }

@@ -23,6 +23,7 @@ pub struct WorktreeInfo {
     pub ahead: usize,
     pub behind: usize,
     pub file_changes: usize,
+    pub created_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,7 +58,7 @@ pub struct ProgressEvent {
 
 // --- Stack types ---
 
-/// Persisted in .worktree-meta.json under "stacks"
+/// Persisted in the app data directory under "metadata/" (one JSON per repo)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StackInfo {
     pub name: String,
@@ -80,6 +81,30 @@ pub struct StackBranchInfo {
     pub behind: usize,
     pub file_changes: usize,
     pub position: usize,
+}
+
+/// Per-repo build configuration (stored in app metadata).
+/// Paths are relative to the worktree root.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildConfig {
+    /// Relative path to the .sln file (e.g. "Sharegate.sln")
+    pub sln_path: String,
+    /// Relative path to the startup executable (e.g. "src/Desktop/bin/Debug/App.exe")
+    pub startup_exe: String,
+}
+
+/// A GitHub PR that has been checked out as a local worktree.
+#[derive(Debug, Clone, Serialize)]
+pub struct PrWorktreeInfo {
+    pub pr_number: u64,
+    pub title: String,
+    pub url: String,
+    pub head_branch: String,
+    pub base_branch: String,
+    pub worktree_path: String,
+    pub worktree_name: String,
+    /// Whether local branch matches the remote PR head. None = could not determine.
+    pub is_up_to_date: Option<bool>,
 }
 
 /// GitHub PR data (fetched live, not persisted)

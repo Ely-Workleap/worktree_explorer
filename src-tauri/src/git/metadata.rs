@@ -1,12 +1,70 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::path::Path;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
-use crate::models::StackInfo;
+use crate::models::{BuildConfig, StackInfo};
 
 const META_FILE: &str = ".worktree-meta.json";
+
+static METADATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Initialize the metadata storage directory. Must be called once at app startup.
+pub fn init_metadata_dir(app_data_dir: PathBuf) {
+    let dir = app_data_dir.join("metadata");
+    std::fs::create_dir_all(&dir).expect("Failed to create metadata directory");
+    METADATA_DIR
+        .set(dir)
+        .expect("METADATA_DIR already initialized");
+}
+
+fn metadata_dir() -> &'static PathBuf {
+    METADATA_DIR
+        .get()
+        .expect("METADATA_DIR not initialized — call init_metadata_dir at startup")
+}
+
+/// Derive the per-repo metadata file path from the repo path.
+fn repo_meta_path(repo_path: &str) -> PathBuf {
+    let canonical = std::fs::canonicalize(repo_path)
+        .unwrap_or_else(|_| PathBuf::from(repo_path));
+    let canonical_str = canonical.to_string_lossy().to_lowercase();
+
+    let mut hasher = DefaultHasher::new();
+    canonical_str.hash(&mut hasher);
+    let hash = hasher.finish();
+    let filename = format!("{:012x}.json", hash);
+
+    metadata_dir().join(filename)
+}
+
+/// Update the debug index file mapping hashes to repo paths (best-effort).
+fn update_index(repo_path: &str) {
+    let index_path = metadata_dir().join("_index.json");
+    let mut index: HashMap<String, String> = std::fs::read_to_string(&index_path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default();
+
+    let canonical = std::fs::canonicalize(repo_path)
+        .unwrap_or_else(|_| PathBuf::from(repo_path));
+    let canonical_str = canonical.to_string_lossy().to_lowercase();
+
+    let mut hasher = DefaultHasher::new();
+    canonical_str.hash(&mut hasher);
+    let hash = hasher.finish();
+    let key = format!("{:012x}", hash);
+
+    index.insert(key, repo_path.to_string());
+
+    if let Ok(content) = serde_json::to_string_pretty(&index) {
+        let _ = std::fs::write(&index_path, content);
+    }
+}
 
 /// Worktree entry in V2 metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +80,8 @@ pub struct MetadataV2 {
     pub worktrees: HashMap<String, WorktreeEntry>,
     #[serde(default)]
     pub stacks: HashMap<String, StackInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_config: Option<BuildConfig>,
 }
 
 impl Default for MetadataV2 {
@@ -30,27 +90,21 @@ impl Default for MetadataV2 {
             version: 2,
             worktrees: HashMap::new(),
             stacks: HashMap::new(),
+            build_config: None,
         }
     }
 }
 
-/// Read metadata, auto-migrating from V1 if needed.
-pub fn read_metadata_v2(repo_path: &str) -> MetadataV2 {
-    let path = Path::new(repo_path).join(META_FILE);
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return MetadataV2::default(),
-    };
-
-    // Try parsing as V2 first
-    if let Ok(v2) = serde_json::from_str::<MetadataV2>(&content) {
+/// Parse legacy content (V1 flat map or V2 JSON) into MetadataV2.
+fn parse_legacy_content(content: &str) -> MetadataV2 {
+    // Try V2 first
+    if let Ok(v2) = serde_json::from_str::<MetadataV2>(content) {
         if v2.version >= 2 {
             return v2;
         }
     }
-
-    // Try parsing as V1 (flat map of worktree_name -> base_branch)
-    if let Ok(v1) = serde_json::from_str::<HashMap<String, String>>(&content) {
+    // Try V1 (flat map of worktree_name -> base_branch)
+    if let Ok(v1) = serde_json::from_str::<HashMap<String, String>>(content) {
         let worktrees = v1
             .into_iter()
             .map(|(name, base_branch)| (name, WorktreeEntry { base_branch }))
@@ -59,18 +113,50 @@ pub fn read_metadata_v2(repo_path: &str) -> MetadataV2 {
             version: 2,
             worktrees,
             stacks: HashMap::new(),
+            build_config: None,
         };
+    }
+    MetadataV2::default()
+}
+
+/// Read metadata from app data dir, with auto-migration from old repo-root location.
+pub fn read_metadata_v2(repo_path: &str) -> MetadataV2 {
+    let app_path = repo_meta_path(repo_path);
+
+    // Try reading from app data dir first
+    if let Ok(content) = std::fs::read_to_string(&app_path) {
+        if let Ok(v2) = serde_json::from_str::<MetadataV2>(&content) {
+            if v2.version >= 2 {
+                return v2;
+            }
+        }
+    }
+
+    // Fallback: try old repo-root location and migrate
+    let old_path = Path::new(repo_path).join(META_FILE);
+    if let Ok(content) = std::fs::read_to_string(&old_path) {
+        let migrated = parse_legacy_content(&content);
+        // Write to new location
+        if write_metadata_v2(repo_path, &migrated).is_ok() {
+            // Delete old file (best-effort)
+            let _ = std::fs::remove_file(&old_path);
+        }
+        return migrated;
     }
 
     MetadataV2::default()
 }
 
-/// Write V2 metadata to disk.
+/// Write V2 metadata to the app data directory.
 pub fn write_metadata_v2(repo_path: &str, meta: &MetadataV2) -> Result<(), AppError> {
-    let path = Path::new(repo_path).join(META_FILE);
+    let path = repo_meta_path(repo_path);
     let content = serde_json::to_string_pretty(meta)
         .map_err(|e| AppError::Custom(format!("Failed to serialize metadata: {}", e)))?;
     std::fs::write(&path, content)?;
+
+    // Update the debug index (best-effort)
+    update_index(repo_path);
+
     Ok(())
 }
 
@@ -219,9 +305,6 @@ pub fn remove_from_stack(
     stack.branches.remove(pos);
     stack.pr_numbers.remove(branch);
 
-    // Relink: if we removed B between A and C, update C's base branch to A (or root)
-    // The actual base_branch update in the worktree entry is handled by the caller (stack_ops)
-
     let result = stack.clone();
 
     // Remove stack if empty
@@ -273,6 +356,21 @@ pub fn rename_stack(
 pub fn list_stacks(repo_path: &str) -> Vec<StackInfo> {
     let meta = read_metadata_v2(repo_path);
     meta.stacks.values().cloned().collect()
+}
+
+/// Get the build config for a repo, if set.
+pub fn get_build_config(repo_path: &str) -> Option<BuildConfig> {
+    read_metadata_v2(repo_path).build_config
+}
+
+/// Save (or clear) the build config for a repo.
+pub fn set_build_config(
+    repo_path: &str,
+    config: Option<BuildConfig>,
+) -> Result<(), AppError> {
+    let mut meta = read_metadata_v2(repo_path);
+    meta.build_config = config;
+    write_metadata_v2(repo_path, &meta)
 }
 
 /// Set a PR number for a branch in a stack.

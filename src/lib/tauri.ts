@@ -13,6 +13,8 @@ import type {
   PrStatus,
   SplitPlan,
   SplitResult,
+  PrWorktreeInfo,
+  BuildConfig,
 } from "@/types";
 
 // --- Existing commands ---
@@ -82,6 +84,14 @@ export async function repairWorktrees(repoPath: string): Promise<string> {
   return invoke("repair_worktrees", { repoPath });
 }
 
+export async function batchDeleteWorktrees(
+  repoPath: string,
+  worktreeNames: string[],
+  checkoutMain: boolean,
+): Promise<string> {
+  return invoke("batch_delete_worktrees", { repoPath, worktreeNames, checkoutMain });
+}
+
 export async function openInVscode(path: string): Promise<void> {
   return invoke("open_in_vscode", { path });
 }
@@ -109,6 +119,22 @@ export async function openClaudeSplit(
   branchName: string,
 ): Promise<void> {
   return invoke("open_claude_split", { worktreePath, worktreeName, repoPath, branchName });
+}
+
+export async function openClaudeCascadeResolve(
+  worktreePath: string,
+  worktreeName: string,
+  repoPath: string,
+  stackName: string,
+  stoppedAtBranch: string,
+): Promise<void> {
+  return invoke("open_claude_cascade_resolve", {
+    worktreePath,
+    worktreeName,
+    repoPath,
+    stackName,
+    stoppedAtBranch,
+  });
 }
 
 // --- Stack commands ---
@@ -215,4 +241,75 @@ export async function pushStack(
   force: boolean,
 ): Promise<string[]> {
   return invoke("push_stack", { repoPath, stackName, force });
+}
+
+export async function checkoutPrWorktree(
+  repoPath: string,
+  prNumber: number,
+): Promise<PrWorktreeInfo> {
+  return invoke("checkout_pr_worktree", { repoPath, prNumber });
+}
+
+export async function pullPrWorktree(
+  repoPath: string,
+  worktreePath: string,
+  prNumber: number,
+): Promise<void> {
+  return invoke("pull_pr_worktree", { repoPath, worktreePath, prNumber });
+}
+
+export async function listPrWorktrees(
+  repoPath: string,
+): Promise<PrWorktreeInfo[]> {
+  return invoke("list_pr_worktrees", { repoPath });
+}
+
+export async function fileExists(path: string): Promise<boolean> {
+  return invoke("file_exists", { path });
+}
+
+export async function getBuildConfig(repoPath: string): Promise<BuildConfig | null> {
+  return invoke("get_build_config", { repoPath });
+}
+
+export async function setBuildConfig(
+  repoPath: string,
+  config: BuildConfig | null,
+): Promise<void> {
+  return invoke("set_build_config", { repoPath, config });
+}
+
+export async function buildPr(
+  worktreePath: string,
+  worktreeName: string,
+  slnPath: string,
+): Promise<void> {
+  return invoke("build_pr", { worktreePath, worktreeName, slnPath });
+}
+
+export async function runPr(
+  worktreePath: string,
+  startupExe: string,
+): Promise<void> {
+  return invoke("run_pr", { worktreePath, startupExe });
+}
+
+export async function openClaudePrReview(
+  worktreePath: string,
+  worktreeName: string,
+  prNumber: number,
+  title: string,
+  url: string,
+  headBranch: string,
+  baseBranch: string,
+): Promise<void> {
+  return invoke("open_claude_pr_review", {
+    worktreePath,
+    worktreeName,
+    prNumber,
+    title,
+    url,
+    headBranch,
+    baseBranch,
+  });
 }

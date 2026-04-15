@@ -1,15 +1,16 @@
-use std::process::Command;
+use crate::util::silent_command;
 
 use git2::{BranchType, Repository};
 
 use crate::error::AppError;
-use crate::models::BranchInfo;
+use crate::git::metadata;
+use crate::models::{BranchInfo, BuildConfig};
 
 #[tauri::command]
 pub async fn list_branches(repo_path: String) -> Result<Vec<BranchInfo>, AppError> {
     tokio::task::spawn_blocking(move || {
         // Fetch all remotes to get the latest branches
-        let _ = Command::new("git")
+        let _ = silent_command("git")
             .args(["-C", &repo_path, "fetch", "--all", "--prune"])
             .output();
 
@@ -43,4 +44,26 @@ pub async fn list_branches(repo_path: String) -> Result<Vec<BranchInfo>, AppErro
     })
     .await
     .map_err(|e| AppError::Custom(format!("Task join error: {}", e)))?
+}
+
+#[tauri::command]
+pub fn file_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
+}
+
+#[tauri::command]
+pub async fn get_build_config(repo_path: String) -> Result<Option<BuildConfig>, AppError> {
+    tokio::task::spawn_blocking(move || Ok(metadata::get_build_config(&repo_path)))
+        .await
+        .map_err(|e| AppError::Custom(format!("Task join error: {}", e)))?
+}
+
+#[tauri::command]
+pub async fn set_build_config(
+    repo_path: String,
+    config: Option<BuildConfig>,
+) -> Result<(), AppError> {
+    tokio::task::spawn_blocking(move || metadata::set_build_config(&repo_path, config))
+        .await
+        .map_err(|e| AppError::Custom(format!("Task join error: {}", e)))?
 }

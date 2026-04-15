@@ -24,6 +24,7 @@ import {
   XCircle,
   Play,
   Pin,
+  Hammer,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -39,19 +40,30 @@ import {
 } from "@/components/ui/popover";
 import { BranchCombobox } from "./BranchCombobox";
 import { DeleteWorktreeDialog } from "./DeleteWorktreeDialog";
-import { openInVscode, openInVisualStudio, openInExplorer, openTerminalTool, openClaudeSplit } from "@/lib/tauri";
+import { openInVscode, openInVisualStudio, openInExplorer, openTerminalTool, openClaudeSplit, buildPr, runPr } from "@/lib/tauri";
 import { useMergeBase, useRebaseOntoMaster, useSetBaseBranch, useRebaseAction } from "@/hooks/use-worktrees";
+import { useExeExists } from "@/hooks/use-build";
 import { useBranches } from "@/hooks/use-branches";
-import type { WorktreeInfo, MergeResult } from "@/types";
+import type { WorktreeInfo, MergeResult, BuildConfig } from "@/types";
+
+function formatRelativeTime(unixSeconds: number): string {
+  const diff = Math.floor(Date.now() / 1000) - unixSeconds;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 2592000) return `${Math.floor(diff / 86400)}d ago`;
+  return new Date(unixSeconds * 1000).toLocaleDateString();
+}
 
 interface WorktreeCardProps {
   worktree: WorktreeInfo;
   repoPath: string;
   isPinned: boolean;
   onTogglePin: () => void;
+  buildConfig?: BuildConfig | null;
 }
 
-export function WorktreeCard({ worktree, repoPath, isPinned, onTogglePin }: WorktreeCardProps) {
+export function WorktreeCard({ worktree, repoPath, isPinned, onTogglePin, buildConfig }: WorktreeCardProps) {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [gitMenuOpen, setGitMenuOpen] = useState(false);
   const [terminalMenuOpen, setTerminalMenuOpen] = useState(false);
@@ -67,6 +79,13 @@ export function WorktreeCard({ worktree, repoPath, isPinned, onTogglePin }: Work
   const setBaseMutation = useSetBaseBranch();
   const rebaseActionMutation = useRebaseAction();
   const { data: branches } = useBranches(baseBranchPickerOpen ? repoPath : null);
+
+  const [building, setBuilding] = useState(false);
+
+  const exePath = buildConfig
+    ? `${worktree.path}/${buildConfig.startup_exe}`.replace(/\\/g, "/")
+    : null;
+  const { data: exeExists } = useExeExists(exePath);
 
   const localBranches = branches?.filter((b) => !b.is_remote) ?? [];
   const branchDisplay = worktree.branch ?? "(detached)";
@@ -247,9 +266,12 @@ export function WorktreeCard({ worktree, repoPath, isPinned, onTogglePin }: Work
               </Badge>
             )}
           </div>
-          <p className="mt-1 truncate text-xs text-muted-foreground">
-            {worktree.path}
-          </p>
+          <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+            <p className="truncate">{worktree.path}</p>
+            {worktree.created_at && (
+              <span className="shrink-0">{formatRelativeTime(worktree.created_at)}</span>
+            )}
+          </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
           <Tooltip>
@@ -409,6 +431,45 @@ export function WorktreeCard({ worktree, repoPath, isPinned, onTogglePin }: Work
               )}
             </PopoverContent>
           </Popover>
+          {buildConfig && (
+            <>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
+                    disabled={building}
+                    onClick={async () => {
+                      setBuilding(true);
+                      try {
+                        await buildPr(worktree.path, worktree.name, buildConfig.sln_path);
+                      } finally {
+                        setBuilding(false);
+                      }
+                    }}
+                  >
+                    {building ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Hammer className="h-3.5 w-3.5" />}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{building ? "Building…" : `Build ${buildConfig.sln_path}`}</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-green-600 hover:text-green-700 dark:text-green-400 dark:hover:text-green-300"
+                    disabled={!exeExists}
+                    onClick={() => runPr(worktree.path, buildConfig.startup_exe)}
+                  >
+                    <Play className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{exeExists ? `Run ${buildConfig.startup_exe}` : "Build first"}</TooltipContent>
+              </Tooltip>
+            </>
+          )}
           {!worktree.is_main && (
             <Tooltip>
               <TooltipTrigger asChild>

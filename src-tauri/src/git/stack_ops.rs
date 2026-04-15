@@ -1,6 +1,7 @@
 use git2::{Repository, RepositoryState};
 use std::collections::HashMap;
-use std::process::Command;
+
+use crate::util::silent_command;
 
 use crate::error::AppError;
 use crate::git::metadata;
@@ -240,7 +241,7 @@ pub fn cascade_rebase(
         message: format!("Fetching origin/{}...", stack.root_branch),
     });
 
-    let _ = Command::new("git")
+    let _ = silent_command("git")
         .args(["-C", repo_path, "fetch", "origin", &stack.root_branch])
         .output();
 
@@ -308,7 +309,7 @@ pub fn cascade_rebase(
 }
 
 /// Find the worktree path for a given branch.
-fn find_worktree_path_for_branch(repo_path: &str, branch: &str) -> Option<String> {
+pub fn find_worktree_path_for_branch(repo_path: &str, branch: &str) -> Option<String> {
     let repo = Repository::open(repo_path).ok()?;
     let worktrees = repo.worktrees().ok()?;
     for name in worktrees.iter().flatten() {

@@ -72,6 +72,13 @@ pub async fn rebase_abort(worktree_path: String) -> Result<MergeResult, AppError
 }
 
 #[tauri::command]
+pub async fn batch_delete_worktrees(repo_path: String, worktree_names: Vec<String>, checkout_main: bool) -> Result<String, AppError> {
+    tokio::task::spawn_blocking(move || worktree_ops::batch_delete_worktrees(&repo_path, &worktree_names, checkout_main))
+        .await
+        .map_err(|e| AppError::Custom(format!("Task join error: {}", e)))?
+}
+
+#[tauri::command]
 pub async fn repair_worktrees(repo_path: String) -> Result<String, AppError> {
     tokio::task::spawn_blocking(move || worktree_ops::repair_worktrees(&repo_path))
         .await

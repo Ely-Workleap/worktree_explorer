@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Command;
+
+use crate::util::silent_command;
 
 use git2::Repository;
 
@@ -105,7 +106,7 @@ pub fn execute_split_plan(
     let rollback = |branches: &[String], worktrees: &[String], repo_path: &str| {
         // Remove worktrees first
         for wt_name in worktrees.iter().rev() {
-            let _ = Command::new("git")
+            let _ = silent_command("git")
                 .args(["-C", repo_path, "worktree", "remove", "--force", wt_name])
                 .output();
         }
@@ -190,7 +191,7 @@ pub fn execute_split_plan(
         if !group.commits.is_empty() {
             // Scenario A: cherry-pick commits
             for sha in &group.commits {
-                let output = Command::new("git")
+                let output = silent_command("git")
                     .args(["-C", &wt_path_str, "cherry-pick", sha])
                     .output()
                     .map_err(|e| {
@@ -220,7 +221,7 @@ pub fn execute_split_plan(
             ];
             checkout_args.extend(group.files.clone());
 
-            let output = Command::new("git")
+            let output = silent_command("git")
                 .args(&checkout_args)
                 .output()
                 .map_err(|e| {
@@ -239,7 +240,7 @@ pub fn execute_split_plan(
             }
 
             // Stage all changes
-            let add_output = Command::new("git")
+            let add_output = silent_command("git")
                 .args(["-C", &wt_path_str, "add", "-A"])
                 .output()
                 .map_err(|e| {
@@ -258,7 +259,7 @@ pub fn execute_split_plan(
             }
 
             // Commit
-            let commit_output = Command::new("git")
+            let commit_output = silent_command("git")
                 .args(["-C", &wt_path_str, "commit", "-m", &group.description])
                 .output()
                 .map_err(|e| {

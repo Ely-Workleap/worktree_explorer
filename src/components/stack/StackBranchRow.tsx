@@ -12,6 +12,9 @@ import {
   Bot,
   Sparkles,
   X,
+  Hammer,
+  Play,
+  Loader2,
 } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -27,8 +30,9 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { PrStatusBadge } from "./PrStatusBadge";
-import { openInVscode, openInVisualStudio, openInExplorer, openTerminalTool } from "@/lib/tauri";
-import type { StackBranchInfo, PrStatus } from "@/types";
+import { openInVscode, openInVisualStudio, openInExplorer, openTerminalTool, buildPr, runPr } from "@/lib/tauri";
+import { useExeExists } from "@/hooks/use-build";
+import type { StackBranchInfo, PrStatus, BuildConfig } from "@/types";
 
 interface StackBranchRowProps {
   branch: StackBranchInfo;
@@ -36,11 +40,18 @@ interface StackBranchRowProps {
   isLast: boolean;
   prStatus?: PrStatus;
   onRemove: () => void;
+  buildConfig?: BuildConfig | null;
 }
 
-export function StackBranchRow({ branch, isFirst, isLast, prStatus, onRemove }: StackBranchRowProps) {
+export function StackBranchRow({ branch, isFirst, isLast, prStatus, onRemove, buildConfig }: StackBranchRowProps) {
   const [terminalMenuOpen, setTerminalMenuOpen] = useState(false);
+  const [building, setBuilding] = useState(false);
   const hasWorktree = !!branch.worktree_path;
+
+  const exePath = buildConfig && branch.worktree_path
+    ? `${branch.worktree_path}/${buildConfig.startup_exe}`.replace(/\\/g, "/")
+    : null;
+  const { data: exeExists } = useExeExists(exePath);
 
   const handleOpenTool = (tool: "claude" | "codex" | "lazygit") => {
     if (!branch.worktree_path || !branch.worktree_name) return;
@@ -151,6 +162,45 @@ export function StackBranchRow({ branch, isFirst, isLast, prStatus, onRemove }: 
                   </button>
                 </PopoverContent>
               </Popover>
+              {buildConfig && branch.worktree_path && branch.worktree_name && (
+                <>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
+                        disabled={building}
+                        onClick={async () => {
+                          setBuilding(true);
+                          try {
+                            await buildPr(branch.worktree_path!, branch.worktree_name!, buildConfig.sln_path);
+                          } finally {
+                            setBuilding(false);
+                          }
+                        }}
+                      >
+                        {building ? <Loader2 className="h-3 w-3 animate-spin" /> : <Hammer className="h-3 w-3" />}
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{building ? "Building…" : `Build ${buildConfig.sln_path}`}</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 text-green-600 hover:text-green-700 dark:text-green-400 dark:hover:text-green-300"
+                        disabled={!exeExists}
+                        onClick={() => runPr(branch.worktree_path!, buildConfig.startup_exe)}
+                      >
+                        <Play className="h-3 w-3" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{exeExists ? `Run ${buildConfig.startup_exe}` : "Build first"}</TooltipContent>
+                  </Tooltip>
+                </>
+              )}
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
@@ -172,7 +222,7 @@ export function StackBranchRow({ branch, isFirst, isLast, prStatus, onRemove }: 
           {branch.is_rebasing && (
             <Badge variant="outline" className="gap-1 border-red-500/50 text-red-600 text-[10px]">
               <AlertTriangle className="h-2 w-2" />
-              Rebasing
+              Conflicts — waiting for resolution
             </Badge>
           )}
           {hasWorktree && (

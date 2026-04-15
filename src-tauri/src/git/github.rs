@@ -1,12 +1,12 @@
 use std::collections::HashMap;
-use std::process::Command;
 
 use crate::error::AppError;
+use crate::util::silent_command;
 use crate::models::PrStatus;
 
 /// Check if `gh` CLI is available.
 pub fn is_gh_available() -> bool {
-    Command::new("gh")
+    silent_command("gh")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -15,7 +15,7 @@ pub fn is_gh_available() -> bool {
 
 /// Get PR status for a single branch.
 pub fn get_pr_status(repo_path: &str, branch: &str) -> Option<PrStatus> {
-    let output = Command::new("gh")
+    let output = silent_command("gh")
         .args([
             "pr", "view", branch,
             "--json", "number,title,state,reviewDecision,url,baseRefName,isDraft,statusCheckRollup",
@@ -68,7 +68,7 @@ pub fn create_pr(
         args.push("--draft");
     }
 
-    let output = Command::new("gh")
+    let output = silent_command("gh")
         .args(&args)
         .current_dir(repo_path)
         .output()
@@ -91,7 +91,7 @@ pub fn update_pr_base(
     pr_number: u64,
     new_base: &str,
 ) -> Result<(), AppError> {
-    let output = Command::new("gh")
+    let output = silent_command("gh")
         .args([
             "api",
             "--method", "PATCH",
@@ -112,7 +112,7 @@ pub fn update_pr_base(
 
 /// Force-push a branch from a worktree.
 pub fn force_push_branch(worktree_path: &str, branch: &str) -> Result<(), AppError> {
-    let output = Command::new("git")
+    let output = silent_command("git")
         .args(["-C", worktree_path, "push", "--force-with-lease", "origin", branch])
         .output()
         .map_err(|e| AppError::Custom(format!("Failed to push {}: {}", branch, e)))?;
@@ -120,6 +120,138 @@ pub fn force_push_branch(worktree_path: &str, branch: &str) -> Result<(), AppErr
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         return Err(AppError::Custom(format!("Failed to push {}: {}", branch, stderr.trim())));
+    }
+
+    Ok(())
+}
+
+/// Fetch a PR's metadata, create a local branch `pr/<number>` from the GitHub ref,
+/// and add a git worktree as a sibling of repo_path.
+/// Idempotent: if the worktree directory already exists, returns existing info.
+pub fn checkout_pr(repo_path: &str, pr_number: u64) -> Result<crate::models::PrWorktreeInfo, AppError> {
+    use std::path::PathBuf;
+
+    // 1. Fetch PR metadata
+    let meta_output = silent_command("gh")
+        .args([
+            "pr", "view", &pr_number.to_string(),
+            "--json", "number,title,url,headRefName,baseRefName",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| AppError::Custom(format!("gh pr view failed: {}", e)))?;
+
+    if !meta_output.status.success() {
+        let stderr = String::from_utf8_lossy(&meta_output.stderr);
+        return Err(AppError::Custom(format!("gh pr view #{}: {}", pr_number, stderr.trim())));
+    }
+
+    let v: serde_json::Value = serde_json::from_slice(&meta_output.stdout)
+        .map_err(|e| AppError::Custom(format!("Failed to parse PR metadata: {}", e)))?;
+
+    let title       = v["title"].as_str().unwrap_or("").to_string();
+    let url         = v["url"].as_str().unwrap_or("").to_string();
+    let head_branch = v["headRefName"].as_str().unwrap_or("").to_string();
+    let base_branch = v["baseRefName"].as_str().unwrap_or("").to_string();
+
+    let local_branch = format!("pr/{}", pr_number);
+    let worktree_name = format!("pr-{}", pr_number);
+
+    // Check if this branch is already checked out in ANY existing worktree.
+    // git won't allow two worktrees on the same branch, so we must detect this
+    // before calling `git worktree add` — regardless of what the directory is named.
+    if let Ok(existing) = crate::git::worktree_ops::list_worktrees(repo_path) {
+        if let Some(wt) = existing.iter().find(|w| w.branch.as_deref() == Some(&local_branch)) {
+            return Ok(crate::models::PrWorktreeInfo {
+                pr_number,
+                title,
+                url,
+                head_branch,
+                base_branch,
+                worktree_path: wt.path.clone(),
+                worktree_name: wt.name.clone(),
+                is_up_to_date: None, // not checked on re-use
+            });
+        }
+    }
+
+    let repo_parent = PathBuf::from(repo_path)
+        .parent()
+        .ok_or_else(|| AppError::Custom("Cannot determine repo parent directory".to_string()))?
+        .to_path_buf();
+    let wt_path = repo_parent.join(&worktree_name);
+    let wt_path_str = wt_path.to_string_lossy().to_string();
+
+    // 2. Fetch the PR ref without touching HEAD
+    let fetch_refspec = format!("refs/pull/{}/head:{}", pr_number, local_branch);
+    let fetch_output = silent_command("git")
+        .args(["-C", repo_path, "fetch", "origin", &fetch_refspec])
+        .output()
+        .map_err(|e| AppError::Custom(format!("git fetch failed: {}", e)))?;
+
+    if !fetch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+        return Err(AppError::Custom(format!("Failed to fetch PR #{}: {}", pr_number, stderr.trim())));
+    }
+
+    // 3. Add the worktree
+    let add_output = silent_command("git")
+        .args(["-C", repo_path, "worktree", "add", &wt_path_str, &local_branch])
+        .output()
+        .map_err(|e| AppError::Custom(format!("git worktree add failed: {}", e)))?;
+
+    if !add_output.status.success() {
+        let stderr = String::from_utf8_lossy(&add_output.stderr);
+        return Err(AppError::Custom(format!("git worktree add failed: {}", stderr.trim())));
+    }
+
+    Ok(crate::models::PrWorktreeInfo {
+        pr_number,
+        title,
+        url,
+        head_branch,
+        base_branch,
+        worktree_path: wt_path_str,
+        worktree_name,
+        is_up_to_date: Some(true), // just fetched, always up to date
+    })
+}
+
+/// Pull the latest changes for a PR worktree.
+/// Re-fetches `refs/pull/<N>/head` from the worktree dir (so FETCH_HEAD lands
+/// in the worktree's own gitdir), then resets the branch to match.
+pub fn pull_pr(_repo_path: &str, worktree_path: &str, pr_number: u64) -> Result<(), AppError> {
+    let local_branch = format!("pr/{}", pr_number);
+
+    // 1. Fetch the latest PR head — run from the *worktree* so FETCH_HEAD is
+    //    written to its gitdir, not the main repo's.
+    let fetch_output = silent_command("git")
+        .args([
+            "-C", worktree_path,
+            "fetch", "origin",
+            &format!("refs/pull/{}/head", pr_number),
+        ])
+        .output()
+        .map_err(|e| AppError::Custom(format!("git fetch failed: {}", e)))?;
+
+    if !fetch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+        return Err(AppError::Custom(format!(
+            "Failed to fetch PR #{}: {}", pr_number, stderr.trim()
+        )));
+    }
+
+    // 2. Reset the worktree's branch to FETCH_HEAD
+    let reset_output = silent_command("git")
+        .args(["-C", worktree_path, "reset", "--hard", "FETCH_HEAD"])
+        .output()
+        .map_err(|e| AppError::Custom(format!("git reset failed: {}", e)))?;
+
+    if !reset_output.status.success() {
+        let stderr = String::from_utf8_lossy(&reset_output.stderr);
+        return Err(AppError::Custom(format!(
+            "Failed to reset {} to latest: {}", local_branch, stderr.trim()
+        )));
     }
 
     Ok(())
