@@ -1,4 +1,5 @@
 use git2::{Repository, RepositoryState};
+use rayon::prelude::*;
 use std::path::PathBuf;
 
 use crate::util::silent_command;
@@ -28,16 +29,13 @@ fn is_repo_rebasing(state: RepositoryState) -> bool {
 pub fn list_worktrees(repo_path: &str) -> Result<Vec<WorktreeInfo>, AppError> {
     let repo = Repository::open(repo_path)?;
     let meta = metadata::read_metadata_v2(repo_path);
-    let mut result = Vec::new();
 
-    // Add main worktree
+    // Main worktree status (sequential — needs shared `repo`)
     let main_status = get_repo_status(&repo)?;
-    let main_branch = repo
-        .head()
-        .ok()
-        .and_then(|h| h.shorthand().map(String::from));
+    let main_branch = repo.head().ok().and_then(|h| h.shorthand().map(String::from));
+    let main_is_rebasing = is_repo_rebasing(repo.state());
 
-    result.push(WorktreeInfo {
+    let mut result = vec![WorktreeInfo {
         name: "main".to_string(),
         path: repo_path.to_string(),
         branch: main_branch,
@@ -46,82 +44,89 @@ pub fn list_worktrees(repo_path: &str) -> Result<Vec<WorktreeInfo>, AppError> {
         is_main: true,
         is_dirty: main_status.is_dirty,
         is_locked: false,
-        is_rebasing: is_repo_rebasing(repo.state()),
+        is_rebasing: main_is_rebasing,
         ahead: main_status.ahead,
         behind: main_status.behind,
         file_changes: main_status.file_changes,
         created_at: get_dir_created_at(repo_path),
-    });
+    }];
 
-    // Add linked worktrees
+    // Collect linked worktree entries (requires shared `repo`, so sequential)
     let worktrees = repo.worktrees()?;
-    for name in worktrees.iter() {
-        let name = match name {
-            Some(n) => n,
-            None => continue,
-        };
+    let entries: Vec<(String, String, bool)> = worktrees
+        .iter()
+        .flatten()
+        .filter_map(|name| {
+            let wt = repo.find_worktree(name).ok()?;
+            let wt_path = wt.path().to_string_lossy().to_string();
+            let is_locked = wt
+                .is_locked()
+                .map(|s| !matches!(s, git2::WorktreeLockStatus::Unlocked))
+                .unwrap_or(false);
+            Some((name.to_string(), wt_path, is_locked))
+        })
+        .collect();
 
-        let wt = match repo.find_worktree(name) {
-            Ok(wt) => wt,
-            Err(_) => continue,
-        };
+    // Drop `repo` before entering the parallel section (it is not Send).
+    drop(repo);
 
-        let wt_path = wt.path().to_string_lossy().to_string();
-        let is_locked = wt.is_locked().map(|s| !matches!(s, git2::WorktreeLockStatus::Unlocked)).unwrap_or(false);
+    // Open each linked worktree and gather status in parallel.
+    let linked: Vec<WorktreeInfo> = entries
+        .par_iter()
+        .map(|(name, wt_path, is_locked)| {
+            let (branch, is_dirty, is_rebasing, ahead, behind, file_changes) =
+                match Repository::open(wt_path) {
+                    Ok(wt_repo) => {
+                        let branch = wt_repo
+                            .head()
+                            .ok()
+                            .and_then(|h| h.shorthand().map(String::from));
+                        let rebasing = is_repo_rebasing(wt_repo.state());
+                        let status = get_repo_status(&wt_repo).unwrap_or_else(|_| {
+                            crate::git::status::RepoStatus {
+                                is_dirty: false,
+                                file_changes: 0,
+                                ahead: 0,
+                                behind: 0,
+                            }
+                        });
+                        (
+                            branch,
+                            status.is_dirty,
+                            rebasing,
+                            status.ahead,
+                            status.behind,
+                            status.file_changes,
+                        )
+                    }
+                    Err(_) => (None, false, false, 0, 0, 0),
+                };
 
-        // Open the worktree's repo to get status
-        let (branch, is_dirty, is_rebasing, ahead, behind, file_changes) =
-            match Repository::open(&wt_path) {
-                Ok(wt_repo) => {
-                    let branch = wt_repo
-                        .head()
-                        .ok()
-                        .and_then(|h| h.shorthand().map(String::from));
-                    let rebasing = is_repo_rebasing(wt_repo.state());
-                    let status = get_repo_status(&wt_repo).unwrap_or_else(|_| {
-                        crate::git::status::RepoStatus {
-                            is_dirty: false,
-                            file_changes: 0,
-                            ahead: 0,
-                            behind: 0,
-                        }
-                    });
-                    (
-                        branch,
-                        status.is_dirty,
-                        rebasing,
-                        status.ahead,
-                        status.behind,
-                        status.file_changes,
-                    )
-                }
-                Err(_) => (None, false, false, 0, 0, 0),
-            };
+            let base_branch = metadata::get_base_branch(&meta, name);
+            let stack_name = branch
+                .as_deref()
+                .and_then(|b| metadata::find_stack_for_branch(&meta, b));
+            let created_at = get_dir_created_at(wt_path);
 
-        let base_branch = metadata::get_base_branch(&meta, name);
-        let stack_name = branch
-            .as_deref()
-            .and_then(|b| metadata::find_stack_for_branch(&meta, b));
+            WorktreeInfo {
+                name: name.clone(),
+                path: wt_path.clone(),
+                branch,
+                base_branch,
+                stack_name,
+                is_main: false,
+                is_dirty,
+                is_locked: *is_locked,
+                is_rebasing,
+                ahead,
+                behind,
+                file_changes,
+                created_at,
+            }
+        })
+        .collect();
 
-        let created_at = get_dir_created_at(&wt_path);
-
-        result.push(WorktreeInfo {
-            name: name.to_string(),
-            path: wt_path,
-            branch,
-            base_branch,
-            stack_name,
-            is_main: false,
-            is_dirty,
-            is_locked,
-            is_rebasing,
-            ahead,
-            behind,
-            file_changes,
-            created_at,
-        });
-    }
-
+    result.extend(linked);
     Ok(result)
 }
 
@@ -129,7 +134,7 @@ pub fn create_worktree(
     request: &CreateWorktreeRequest,
     on_progress: impl Fn(ProgressEvent),
 ) -> Result<WorktreeInfo, AppError> {
-    let total = if request.create_branch && request.base_branch.is_some() { 5 } else { 4 };
+    let total = 4;
     let mut step = 0;
 
     let mut emit = |msg: &str| {
@@ -144,11 +149,15 @@ pub fn create_worktree(
     emit("Opening repository...");
     let repo = Repository::open(&request.repo_path)?;
 
-    let repo_parent = PathBuf::from(&request.repo_path)
-        .parent()
-        .ok_or_else(|| AppError::Custom("Cannot determine parent directory".to_string()))?
-        .to_path_buf();
-    let wt_path = repo_parent.join(&request.name);
+    let wt_path = if let Some(root) = &request.worktree_root {
+        PathBuf::from(root).join(&request.name)
+    } else {
+        PathBuf::from(&request.repo_path)
+            .parent()
+            .ok_or_else(|| AppError::Custom("Cannot determine parent directory".to_string()))?
+            .to_path_buf()
+            .join(&request.name)
+    };
 
     if wt_path.exists() {
         return Err(AppError::Custom(format!(
@@ -175,14 +184,9 @@ pub fn create_worktree(
     };
 
     if request.create_branch {
-        if let Some(base) = &request.base_branch {
-            emit(&format!("Fetching latest {}...", base));
-            // Strip "origin/" prefix for git fetch (fetch takes the branch name, not the remote ref)
-            let fetch_branch = base.strip_prefix("origin/").unwrap_or(base.as_str());
-            let _ = silent_command("git")
-                .args(["-C", &request.repo_path, "fetch", "origin", fetch_branch])
-                .output();
-        }
+        // Note: no git fetch here — fetching triggers GCM credential prompts on Windows
+        // and can hold a git lock that conflicts with worktree creation. The user should
+        // fetch manually if they need the latest remote refs before creating a worktree.
 
         // Check if the branch already exists
         let branch_ref_name = format!("refs/heads/{}", branch_name);

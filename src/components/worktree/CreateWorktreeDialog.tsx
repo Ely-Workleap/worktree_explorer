@@ -22,6 +22,7 @@ import {
 import { BranchCombobox } from "./BranchCombobox";
 import { useBranches } from "@/hooks/use-branches";
 import { useCreateWorktree } from "@/hooks/use-worktrees";
+import { useSettings } from "@/hooks/use-settings";
 
 interface ProgressEvent {
   step: number;
@@ -64,6 +65,7 @@ export function CreateWorktreeDialog({
 
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
 
+  const { worktreeRoot } = useSettings();
   const { data: branches } = useBranches(open ? repoPath : null);
   const createMutation = useCreateWorktree();
 
@@ -117,6 +119,7 @@ export function CreateWorktreeDialog({
         branch,
         create_branch: branchMode === "new",
         base_branch: branchMode === "new" && baseBranch ? baseBranch : null,
+        worktree_root: worktreeRoot,
       },
       {
         onSuccess: () => {

@@ -20,3 +20,17 @@ export async function setRootPath(path: string): Promise<void> {
   const store = await getStore();
   await store.set("rootPath", path);
 }
+
+export async function getWorktreeRoot(): Promise<string | null> {
+  const store = await getStore();
+  return (await store.get<string>("worktreeRoot")) ?? null;
+}
+
+export async function setWorktreeRoot(path: string | null): Promise<void> {
+  const store = await getStore();
+  if (path) {
+    await store.set("worktreeRoot", path);
+  } else {
+    await store.delete("worktreeRoot");
+  }
+}

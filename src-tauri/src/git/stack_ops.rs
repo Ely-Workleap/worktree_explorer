@@ -33,6 +33,7 @@ pub fn create_stack(
         branch: Some(request.initial_branch.clone()),
         create_branch: true,
         base_branch: Some(request.root_branch.clone()),
+        worktree_root: request.worktree_root.clone(),
     };
 
     match worktree_ops::create_worktree(&wt_request, on_progress) {
@@ -72,6 +73,7 @@ pub fn add_branch_to_stack(
         branch: Some(request.branch_name.clone()),
         create_branch: true,
         base_branch: Some(base_branch),
+        worktree_root: request.worktree_root.clone(),
     };
 
     worktree_ops::create_worktree(&wt_request, on_progress)?;

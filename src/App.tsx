@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Header } from "@/components/layout/Header";
@@ -10,7 +10,7 @@ import { useRepos } from "@/hooks/use-repos";
 import { useRefreshOnFocus } from "@/hooks/use-refresh-on-focus";
 
 function App() {
-  const { rootPath, setRootPath, loading: settingsLoading } = useSettings();
+  const { rootPath, setRootPath, worktreeRoot, setWorktreeRoot, loading: settingsLoading } = useSettings();
   const { data: repos = [], isLoading: reposLoading, isFetching } = useRepos(rootPath);
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -18,12 +18,35 @@ function App() {
 
   useRefreshOnFocus();
 
+  const [sidebarWidth, setSidebarWidth] = useState(280);
+  const isResizing = useRef(false);
+
+  const startResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isResizing.current = true;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!isResizing.current) return;
+      setSidebarWidth(Math.max(180, Math.min(520, ev.clientX)));
+    };
+
+    const onMouseUp = () => {
+      isResizing.current = false;
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  }, []);
+
   const handleRefresh = () => {
     queryClient.invalidateQueries();
   };
 
-  const handleSettingsSave = async (path: string) => {
+  const handleSettingsSave = async (path: string, wtRoot: string | null) => {
     await setRootPath(path);
+    await setWorktreeRoot(wtRoot);
     setSelectedRepo(null);
   };
 
@@ -43,8 +66,8 @@ function App() {
           onSettingsOpen={() => setSettingsOpen(true)}
           isRefreshing={isFetching}
         />
-        <div className="grid flex-1 grid-cols-[280px_1fr] overflow-hidden">
-          <div className="border-r">
+        <div className="flex flex-1 overflow-hidden">
+          <div style={{ width: sidebarWidth, flexShrink: 0 }} className="overflow-hidden border-r">
             <Sidebar
               repos={repos}
               selectedRepo={selectedRepo}
@@ -54,7 +77,11 @@ function App() {
               onSettingsOpen={() => setSettingsOpen(true)}
             />
           </div>
-          <div className="overflow-hidden">
+          <div
+            className="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/40"
+            onMouseDown={startResize}
+          />
+          <div className="flex-1 overflow-hidden">
             <MainPanel selectedRepo={selectedRepo} />
           </div>
         </div>
@@ -63,6 +90,7 @@ function App() {
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
         rootPath={rootPath}
+        worktreeRoot={worktreeRoot}
         onSave={handleSettingsSave}
       />
     </TooltipProvider>

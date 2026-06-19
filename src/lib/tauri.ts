@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getWorktreeRoot } from "@/lib/store";
 import type {
   RepoInfo,
   WorktreeInfo,
@@ -153,13 +154,15 @@ export async function getStackDetails(
 export async function createStack(
   request: CreateStackRequest,
 ): Promise<StackInfo> {
-  return invoke("create_stack", { request });
+  const worktreeRoot = await getWorktreeRoot();
+  return invoke("create_stack", { request: { ...request, worktree_root: worktreeRoot } });
 }
 
 export async function addBranchToStack(
   request: AddToStackRequest,
 ): Promise<StackInfo> {
-  return invoke("add_branch_to_stack", { request });
+  const worktreeRoot = await getWorktreeRoot();
+  return invoke("add_branch_to_stack", { request: { ...request, worktree_root: worktreeRoot } });
 }
 
 export async function removeBranchFromStack(
@@ -204,7 +207,8 @@ export async function cascadeRebase(
 export async function splitIntoStack(
   plan: SplitPlan,
 ): Promise<SplitResult> {
-  return invoke("split_into_stack", { plan });
+  const worktreeRoot = await getWorktreeRoot();
+  return invoke("split_into_stack", { plan: { ...plan, worktree_root: worktreeRoot } });
 }
 
 // --- GitHub commands ---
@@ -247,7 +251,8 @@ export async function checkoutPrWorktree(
   repoPath: string,
   prNumber: number,
 ): Promise<PrWorktreeInfo> {
-  return invoke("checkout_pr_worktree", { repoPath, prNumber });
+  const worktreeRoot = await getWorktreeRoot();
+  return invoke("checkout_pr_worktree", { repoPath, prNumber, worktreeRoot });
 }
 
 export async function pullPrWorktree(

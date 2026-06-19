@@ -1,8 +1,9 @@
-import { useState } from "react";
-import { Search, GitFork, FolderOpen, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Search, GitFork, FolderOpen, X, GitBranch, Trash2, Loader2, AlertCircle } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
+import { useWorktrees, useDeleteWorktree } from "@/hooks/use-worktrees";
 import type { RepoInfo } from "@/types";
 
 interface SidebarProps {
@@ -68,10 +69,7 @@ export function Sidebar({
           {isLoading ? (
             <div className="space-y-2 p-2">
               {Array.from({ length: 5 }).map((_, i) => (
-                <div
-                  key={i}
-                  className="h-10 animate-pulse rounded-md bg-muted"
-                />
+                <div key={i} className="h-10 animate-pulse rounded-md bg-muted" />
               ))}
             </div>
           ) : filtered.length === 0 ? (
@@ -82,25 +80,129 @@ export function Sidebar({
             </p>
           ) : (
             filtered.map((repo) => (
-              <button
+              <RepoRow
                 key={repo.path}
-                onClick={() => onSelectRepo(repo.path)}
-                className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-accent ${
-                  selectedRepo === repo.path
-                    ? "bg-accent text-accent-foreground"
-                    : ""
-                }`}
-              >
-                <GitFork className="h-4 w-4 shrink-0 text-muted-foreground" />
-                <span className="truncate font-medium">{repo.name}</span>
-                <span className="ml-auto text-xs text-muted-foreground">
-                  {repo.worktree_count}
-                </span>
-              </button>
+                repo={repo}
+                isSelected={selectedRepo === repo.path}
+                onSelect={() => onSelectRepo(repo.path)}
+              />
             ))
           )}
         </div>
       </ScrollArea>
+    </div>
+  );
+}
+
+function RepoRow({
+  repo,
+  isSelected,
+  onSelect,
+}: {
+  repo: RepoInfo;
+  isSelected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <div>
+      <button
+        onClick={onSelect}
+        className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-accent ${
+          isSelected ? "bg-accent text-accent-foreground" : ""
+        }`}
+      >
+        <GitFork className="h-4 w-4 shrink-0 text-muted-foreground" />
+        <span className="truncate font-medium">{repo.name}</span>
+        <span className="ml-auto text-xs text-muted-foreground">
+          {repo.worktree_count}
+        </span>
+      </button>
+
+      {isSelected && <WorktreeSubList repoPath={repo.path} />}
+    </div>
+  );
+}
+
+function WorktreeSubList({ repoPath }: { repoPath: string }) {
+  const { data: worktrees, isLoading } = useWorktrees(repoPath);
+  const deleteMutation = useDeleteWorktree();
+  const [confirmName, setConfirmName] = useState<string | null>(null);
+
+  // Auto-cancel confirm state after 3 s
+  useEffect(() => {
+    if (!confirmName) return;
+    const t = setTimeout(() => setConfirmName(null), 3000);
+    return () => clearTimeout(t);
+  }, [confirmName]);
+
+  if (isLoading) {
+    return (
+      <div className="ml-5 mt-0.5 space-y-1 pb-1">
+        {Array.from({ length: 2 }).map((_, i) => (
+          <div key={i} className="h-7 animate-pulse rounded bg-muted" />
+        ))}
+      </div>
+    );
+  }
+
+  if (!worktrees?.length) return null;
+
+  return (
+    <div className="ml-5 mt-0.5 space-y-0.5 border-l pb-1 pl-2">
+      {worktrees.map((wt) => {
+        const isConfirming = confirmName === wt.name;
+        const isDeleting =
+          deleteMutation.isPending &&
+          (deleteMutation.variables as { worktreeName: string })?.worktreeName === wt.name;
+
+        return (
+          <div
+            key={wt.name}
+            className="group flex items-center gap-1.5 rounded px-2 py-1 text-xs hover:bg-accent"
+          >
+            <GitBranch className="h-3 w-3 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate text-muted-foreground">
+              {wt.branch ?? wt.name}
+              {wt.is_main && (
+                <span className="ml-1 text-[10px] text-muted-foreground/60">(main)</span>
+              )}
+            </span>
+            {wt.is_dirty && (
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-yellow-500" title="Dirty" />
+            )}
+
+            {!wt.is_main && (
+              isConfirming ? (
+                <button
+                  onClick={() => {
+                    setConfirmName(null);
+                    deleteMutation.mutate({ repoPath, worktreeName: wt.name });
+                  }}
+                  className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium text-destructive ring-1 ring-destructive hover:bg-destructive hover:text-destructive-foreground"
+                >
+                  Confirm
+                </button>
+              ) : isDeleting ? (
+                <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
+              ) : deleteMutation.isError &&
+                (deleteMutation.variables as { worktreeName: string })?.worktreeName === wt.name ? (
+                <span title="Delete failed"><AlertCircle className="h-3 w-3 shrink-0 text-destructive" /></span>
+              ) : (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConfirmName(wt.name);
+                  }}
+                  className="hidden shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive group-hover:block"
+                  title="Delete worktree"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              )
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

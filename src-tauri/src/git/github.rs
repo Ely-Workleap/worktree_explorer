@@ -128,7 +128,7 @@ pub fn force_push_branch(worktree_path: &str, branch: &str) -> Result<(), AppErr
 /// Fetch a PR's metadata, create a local branch `pr/<number>` from the GitHub ref,
 /// and add a git worktree as a sibling of repo_path.
 /// Idempotent: if the worktree directory already exists, returns existing info.
-pub fn checkout_pr(repo_path: &str, pr_number: u64) -> Result<crate::models::PrWorktreeInfo, AppError> {
+pub fn checkout_pr(repo_path: &str, pr_number: u64, worktree_root: Option<&str>) -> Result<crate::models::PrWorktreeInfo, AppError> {
     use std::path::PathBuf;
 
     // 1. Fetch PR metadata
@@ -175,11 +175,15 @@ pub fn checkout_pr(repo_path: &str, pr_number: u64) -> Result<crate::models::PrW
         }
     }
 
-    let repo_parent = PathBuf::from(repo_path)
-        .parent()
-        .ok_or_else(|| AppError::Custom("Cannot determine repo parent directory".to_string()))?
-        .to_path_buf();
-    let wt_path = repo_parent.join(&worktree_name);
+    let wt_path = if let Some(root) = worktree_root {
+        PathBuf::from(root).join(&worktree_name)
+    } else {
+        PathBuf::from(repo_path)
+            .parent()
+            .ok_or_else(|| AppError::Custom("Cannot determine repo parent directory".to_string()))?
+            .to_path_buf()
+            .join(&worktree_name)
+    };
     let wt_path_str = wt_path.to_string_lossy().to_string();
 
     // 2. Fetch the PR ref without touching HEAD

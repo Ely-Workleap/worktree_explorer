@@ -17,10 +17,14 @@ pub fn execute_split_plan(
     on_progress: impl Fn(ProgressEvent),
 ) -> Result<SplitResult, AppError> {
     let repo = Repository::open(&plan.repo_path)?;
-    let repo_parent = PathBuf::from(&plan.repo_path)
-        .parent()
-        .ok_or_else(|| AppError::Custom("Cannot determine repo parent directory".into()))?
-        .to_path_buf();
+    let repo_parent = if let Some(root) = &plan.worktree_root {
+        PathBuf::from(root)
+    } else {
+        PathBuf::from(&plan.repo_path)
+            .parent()
+            .ok_or_else(|| AppError::Custom("Cannot determine repo parent directory".into()))?
+            .to_path_buf()
+    };
 
     let total = plan.groups.len() + 2; // +1 backup, +1 metadata
     let mut step = 0;

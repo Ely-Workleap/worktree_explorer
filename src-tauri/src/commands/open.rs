@@ -200,14 +200,13 @@ fn build_pr_review_prompt(
     title: &str,
     url: &str,
     _head_branch: &str,
-    base_branch: &str,
+    _base_branch: &str,
 ) -> String {
     format!(
-r#"Run `git diff {base_branch}...pr/{pr_number}` to load the full diff of PR #{pr_number} ("{title}", {url}) into context, then stay ready to answer any questions about the changes."#,
+r#"Look at PR #{pr_number} ("{title}", {url}) and be ready to answer questions about it."#,
         pr_number = pr_number,
         title = title,
         url = url,
-        base_branch = base_branch,
     )
 }
 

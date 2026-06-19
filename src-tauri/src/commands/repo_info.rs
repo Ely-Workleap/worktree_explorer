@@ -1,5 +1,3 @@
-use crate::util::silent_command;
-
 use git2::{BranchType, Repository};
 
 use crate::error::AppError;
@@ -9,11 +7,6 @@ use crate::models::{BranchInfo, BuildConfig};
 #[tauri::command]
 pub async fn list_branches(repo_path: String) -> Result<Vec<BranchInfo>, AppError> {
     tokio::task::spawn_blocking(move || {
-        // Fetch all remotes to get the latest branches
-        let _ = silent_command("git")
-            .args(["-C", &repo_path, "fetch", "--all", "--prune"])
-            .output();
-
         let repo = Repository::open(&repo_path)?;
         let mut branches = Vec::new();
 

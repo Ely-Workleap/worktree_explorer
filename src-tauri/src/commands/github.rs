@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::util::silent_command;
+use rayon::prelude::*;
 
 use tauri::Emitter;
 
@@ -189,13 +190,14 @@ pub async fn pull_pr_worktree(
         .map_err(|e| AppError::Custom(format!("Task join error: {}", e)))?
 }
 
-/// Fetch a GitHub PR and check it out as a sibling worktree. Idempotent.
+/// Fetch a GitHub PR and check it out as a worktree. Idempotent.
 #[tauri::command]
 pub async fn checkout_pr_worktree(
     repo_path: String,
     pr_number: u64,
+    worktree_root: Option<String>,
 ) -> Result<PrWorktreeInfo, AppError> {
-    tokio::task::spawn_blocking(move || github::checkout_pr(&repo_path, pr_number))
+    tokio::task::spawn_blocking(move || github::checkout_pr(&repo_path, pr_number, worktree_root.as_deref()))
         .await
         .map_err(|e| AppError::Custom(format!("Task join error: {}", e)))?
 }
@@ -233,80 +235,39 @@ pub async fn list_pr_worktrees(
             return Ok(Vec::new());
         }
 
-        // Batch-fetch remote PR head SHAs with a single git ls-remote call
-        let remote_shas = fetch_remote_pr_shas(&repo_path, &pr_wts.iter().map(|(n, ..)| *n).collect::<Vec<_>>());
+        // Fetch PR metadata and local HEAD SHAs in parallel (each gh/git call is independent).
+        // Remote SHA comes from gh pr view (headRefOid) to avoid a credential-prompting git ls-remote.
+        let result: Vec<PrWorktreeInfo> = pr_wts
+            .par_iter()
+            .map(|(pr_number, branch, wt_path, wt_name)| {
+                let (title, url, head_branch, base_branch, remote_sha) = if gh_ok {
+                    fetch_pr_meta_lightweight(&repo_path, *pr_number)
+                } else {
+                    (String::new(), String::new(), branch.clone(), String::new(), None)
+                };
 
-        let mut result = Vec::new();
-        for (pr_number, branch, wt_path, wt_name) in pr_wts {
-            let (title, url, head_branch, base_branch) = if gh_ok {
-                fetch_pr_meta_lightweight(&repo_path, pr_number)
-            } else {
-                (String::new(), String::new(), branch.clone(), String::new())
-            };
+                let is_up_to_date = remote_sha.and_then(|remote| {
+                    let local_sha = get_local_head_sha(wt_path)?;
+                    Some(local_sha == remote)
+                });
 
-            // Compare local HEAD with remote SHA
-            let is_up_to_date = remote_shas.as_ref().ok().and_then(|shas| {
-                let remote_sha = shas.get(&pr_number)?;
-                let local_sha = get_local_head_sha(&wt_path)?;
-                Some(local_sha == *remote_sha)
-            });
-
-            result.push(PrWorktreeInfo {
-                pr_number,
-                title,
-                url,
-                head_branch,
-                base_branch,
-                worktree_path: wt_path,
-                worktree_name: wt_name,
-                is_up_to_date,
-            });
-        }
+                PrWorktreeInfo {
+                    pr_number: *pr_number,
+                    title,
+                    url,
+                    head_branch,
+                    base_branch,
+                    worktree_path: wt_path.clone(),
+                    worktree_name: wt_name.clone(),
+                    is_up_to_date,
+                }
+            })
+            .collect();
 
         Ok(result)
     })
     .await
     .map_err(|e| AppError::Custom(format!("Task join error: {}", e)))?
-}
-
-/// Batch-fetch remote SHAs for PR head refs using a single `git ls-remote` call.
-fn fetch_remote_pr_shas(
-    repo_path: &str,
-    pr_numbers: &[u64],
-) -> Result<HashMap<u64, String>, ()> {
-    let mut args = vec!["-C", repo_path, "ls-remote", "origin"];
-    let refs: Vec<String> = pr_numbers
-        .iter()
-        .map(|n| format!("refs/pull/{}/head", n))
-        .collect();
-    let ref_strs: Vec<&str> = refs.iter().map(|s| s.as_str()).collect();
-    args.extend_from_slice(&ref_strs);
-
-    let output = silent_command("git")
-        .args(&args)
-        .output()
-        .map_err(|_| ())?;
-
-    if !output.status.success() {
-        return Err(());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut map = HashMap::new();
-    for line in stdout.lines() {
-        // Format: "<sha>\trefs/pull/<N>/head"
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() == 2 {
-            if let Some(rest) = parts[1].strip_prefix("refs/pull/") {
-                if let Some(num_str) = rest.strip_suffix("/head") {
-                    if let Ok(n) = num_str.parse::<u64>() {
-                        map.insert(n, parts[0].to_string());
-                    }
-                }
-            }
-        }
-    }
-    Ok(map)
 }
 
 /// Get the HEAD commit SHA of a worktree.
@@ -322,11 +283,14 @@ fn get_local_head_sha(worktree_path: &str) -> Option<String> {
     }
 }
 
-fn fetch_pr_meta_lightweight(repo_path: &str, pr_number: u64) -> (String, String, String, String) {
+/// Returns (title, url, headRefName, baseRefName, headRefOid).
+/// headRefOid is the remote PR head SHA — used to check up-to-date status without
+/// a credential-prompting `git ls-remote` call.
+fn fetch_pr_meta_lightweight(repo_path: &str, pr_number: u64) -> (String, String, String, String, Option<String>) {
     let output = silent_command("gh")
         .args([
             "pr", "view", &pr_number.to_string(),
-            "--json", "title,url,headRefName,baseRefName",
+            "--json", "title,url,headRefName,baseRefName,headRefOid",
         ])
         .current_dir(repo_path)
         .output();
@@ -339,9 +303,10 @@ fn fetch_pr_meta_lightweight(repo_path: &str, pr_number: u64) -> (String, String
                     v["url"].as_str().unwrap_or("").to_string(),
                     v["headRefName"].as_str().unwrap_or("").to_string(),
                     v["baseRefName"].as_str().unwrap_or("").to_string(),
+                    v["headRefOid"].as_str().map(|s| s.to_string()),
                 );
             }
         }
     }
-    (String::new(), String::new(), format!("pr/{}", pr_number), String::new())
+    (String::new(), String::new(), format!("pr/{}", pr_number), String::new(), None)
 }

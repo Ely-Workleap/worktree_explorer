@@ -38,6 +38,7 @@ export interface CreateWorktreeRequest {
   branch: string | null;
   create_branch: boolean;
   base_branch: string | null;
+  worktree_root: string | null;
 }
 
 // --- Stack types ---
@@ -91,6 +92,7 @@ export interface CreateStackRequest {
   root_branch: string;
   initial_branch: string;
   worktree_name: string;
+  worktree_root?: string | null;
 }
 
 export interface AddToStackRequest {
@@ -99,6 +101,7 @@ export interface AddToStackRequest {
   branch_name: string;
   worktree_name: string;
   position: number | null;
+  worktree_root?: string | null;
 }
 
 // --- Split types ---
@@ -117,6 +120,7 @@ export interface SplitPlan {
   stack_name: string;
   root_branch: string;
   groups: SplitGroup[];
+  worktree_root?: string | null;
 }
 
 export interface SplitResult {

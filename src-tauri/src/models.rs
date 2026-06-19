@@ -47,6 +47,7 @@ pub struct CreateWorktreeRequest {
     pub branch: Option<String>,
     pub create_branch: bool,
     pub base_branch: Option<String>,
+    pub worktree_root: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,6 +144,7 @@ pub struct CreateStackRequest {
     pub root_branch: String,
     pub initial_branch: String,
     pub worktree_name: String,
+    pub worktree_root: Option<String>,
 }
 
 /// Request to add a branch to an existing stack
@@ -153,6 +155,7 @@ pub struct AddToStackRequest {
     pub branch_name: String,
     pub worktree_name: String,
     pub position: Option<usize>,
+    pub worktree_root: Option<String>,
 }
 
 // --- Split types ---
@@ -179,6 +182,7 @@ pub struct SplitPlan {
     pub stack_name: String,
     pub root_branch: String,
     pub groups: Vec<SplitGroup>,
+    pub worktree_root: Option<String>,
 }
 
 /// Result of executing a split plan.
